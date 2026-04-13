@@ -1,0 +1,16 @@
+{
+  "name": "ffmpeg-plugin",
+  "version": "1.0.0",
+  "description": "https://github.com/anyliew/ffmpeg-plugin",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Anyliew",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.15.0"
+  },
+  "type": "module"
+}
