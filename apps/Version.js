@@ -36,15 +36,37 @@ async function getFfmpegVersionInfo() {
 }
 
 /**
- * 提取版本号
+ * 提取版本号（支持官方稳定版和 BtbN 自动构建版）
+ * 示例输入: "ffmpeg version N-122785-g38cd91c99a-20260218 Copyright ..."
+ * 输出: "N-122785-g38cd91c99a-20260218"
  */
 function extractVersionNumber(versionOutput) {
-  const match = versionOutput.match(/ffmpeg version\s+([\d\.]+)/i)
+  const match = versionOutput.match(/ffmpeg version\s+(\S+)/i)
   return match ? match[1] : '未知'
 }
 
 /**
- * 提取编译配置项（--enable-xxx）
+ * 从版本信息中提取基础版本（如 6.1, 7.0）或标记为开发版
+ * @param {string} versionOutput - ffmpeg -version 完整输出
+ * @param {string} versionNumber - 已提取的版本号字符串
+ * @returns {string} 描述字符串，如 "基于 FFmpeg 6.1 构建" 或 "基于 FFmpeg git 开发版 (自动构建)"
+ */
+function getBaseVersionDescription(versionOutput, versionNumber) {
+  // 尝试匹配主版本号（例如 6.1.0 -> 6.1，或者 7.0.2 -> 7.0）
+  const stableMatch = versionOutput.match(/ffmpeg version\s+(\d+\.\d+)/i)
+  if (stableMatch) {
+    const baseVer = stableMatch[1]
+    return `基于 FFmpeg ${baseVer} 构建`
+  }
+  // 如果是 BtbN 风格（以 N- 开头）或包含 git 哈希
+  if (versionNumber.startsWith('N-') || versionNumber.includes('g') || versionNumber.includes('-')) {
+    return `基于 FFmpeg git 开发版 (BtbN 自动构建)`
+  }
+  return `基于 FFmpeg 自定义构建`
+}
+
+/**
+ * 提取编译配置项（--enable-xxx / --disable-xxx）
  */
 function extractConfigureOptions(versionOutput) {
   const match = versionOutput.match(/configuration:\s+(.+)/)
@@ -81,9 +103,9 @@ async function getGitLogDetailed(pluginDir) {
 }
 
 /**
- * 生成 HTML（新样式，符合用户要求）
+ * 生成 HTML（优化版：正确显示 BtbN 版本号 + 动态版本描述）
  * @param {string} versionRaw - ffmpeg -version 原始输出
- * @param {string} versionNumber - 版本号
+ * @param {string} versionNumber - 提取的版本号
  * @param {Array} commits - 提交记录数组 [{ hash, title, author, date }]
  * @param {Array} configureOptions - 编译选项数组
  */
@@ -97,6 +119,8 @@ function buildHtml(versionRaw, versionNumber, commits, configureOptions) {
       return m
     })
   }
+
+  const baseVersionDesc = getBaseVersionDescription(versionRaw, versionNumber)
 
   // 生成提交记录列表 HTML
   const commitsHtml = commits.map(commit => `
@@ -116,7 +140,11 @@ function buildHtml(versionRaw, versionNumber, commits, configureOptions) {
   // 生成编译选项标签
   const configChips = configureOptions.map(opt => `<span class="config-chip">${escapeHtml(opt)}</span>`).join('')
 
-  // 完整 HTML 结构（采用之前设计的卡片布局，字体使用相对路径）
+  // 动态生成当前时间
+  const now = new Date()
+  const formattedTime = `${now.getFullYear()}/${now.getMonth()+1}/${now.getDate()} ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`
+
+  // 完整 HTML 结构（卡片布局）
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -233,8 +261,9 @@ function buildHtml(versionRaw, versionNumber, commits, configureOptions) {
             border-radius: 2rem;
             font-family: monospace;
             font-weight: 700;
-            font-size: 1.2rem;
+            font-size: 1.1rem;
             color: #1b6b87;
+            word-break: break-all;
         }
 
         .version-detail {
@@ -383,7 +412,7 @@ function buildHtml(versionRaw, versionNumber, commits, configureOptions) {
         </div>
         <div class="version-info">
             <div class="version-tag">ffmpeg version ${escapeHtml(versionNumber)}</div>
-            <div class="version-detail">基于 FFmpeg 6.1+ 构建</div>
+            <div class="version-detail">${escapeHtml(baseVersionDesc)}</div>
         </div>
         <div class="config-list">
             ${configChips || '<span class="config-chip">--enable-gpl</span><span class="config-chip">--enable-libx264</span>'}
@@ -455,9 +484,9 @@ function buildHtml(versionRaw, versionNumber, commits, configureOptions) {
         </div>
     </div>
 
-    <!-- 底部：固定时间 + Powered by ffmpeg-plugin -->
+    <!-- 底部：动态时间 + Powered by ffmpeg-plugin -->
     <div class="footer">
-        <div>生成时间: 2025/4/13 23:50:00</div>
+        <div>生成时间: ${formattedTime}</div>
         <div class="powered">Powered by ffmpeg-plugin</div>
     </div>
 </div>
