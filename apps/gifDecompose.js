@@ -1,94 +1,119 @@
-import fs from 'fs'
-import path from 'path'
-import axios from 'axios'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import { promises as fs } from 'fs'
 import { createWriteStream } from 'fs'
+import path from 'path'
+import os from 'os'
+import axios from 'axios'
 
 const execPromise = promisify(exec)
 
 /**
- * 确保临时目录存在
+ * 下载图片到临时文件
+ * @param {string} url 图片URL
+ * @returns {Promise<string>} 临时文件路径
  */
-function ensureTempDir() {
-    const tempDir = path.join(process.cwd(), 'temp', 'ffmpeg')
-    if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true })
-        logger.info(`[GIF转换] 创建临时目录: ${tempDir}`)
-    }
-    return tempDir
-}
-
-/**
- * 生成随机临时文件路径
- */
-function getTempFilePath(extension) {
-    const tempDir = ensureTempDir()
-    const randomName = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}${extension}`
-    return path.join(tempDir, randomName)
-}
-
-/**
- * 下载文件到本地
- */
-async function downloadFile(url, destPath) {
+async function downloadImageToTemp(url) {
     const response = await axios({
         method: 'GET',
         url: url,
         responseType: 'stream',
-        timeout: 60000,
-        maxContentLength: 200 * 1024 * 1024
+        timeout: 15000
     })
-    const writer = createWriteStream(destPath)
+    const ext = path.extname(url).split('?')[0] || '.tmp'
+    const tempFile = path.join(os.tmpdir(), `img_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`)
+    const writer = createWriteStream(tempFile)
     response.data.pipe(writer)
     await new Promise((resolve, reject) => {
         writer.on('finish', resolve)
         writer.on('error', reject)
     })
-    return destPath
+    return tempFile
 }
 
 /**
- * 格式化文件大小
+ * 使用 ffprobe 快速获取图片格式（仅判断是否为 GIF）
+ * @param {string} filePath 文件路径
+ * @returns {Promise<string>} 格式名称 (GIF/其他)
  */
-function formatSizeMB(bytes) {
-    return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
-}
-
-/**
- * 清理临时文件
- */
-async function cleanupTempFile(filePath) {
-    if (filePath && fs.existsSync(filePath)) {
-        await fs.promises.unlink(filePath).catch(err => logger.warn(`清理失败: ${filePath} - ${err.message}`))
+async function getImageFormatByFfprobe(filePath) {
+    try {
+        const { stdout } = await execPromise(
+            `ffprobe -v quiet -print_format json -show_streams "${filePath}"`
+        )
+        const data = JSON.parse(stdout)
+        const videoStream = data.streams?.find(s => s.codec_type === 'video')
+        if (!videoStream) return '未知'
+        let format = videoStream.codec_name?.toUpperCase() || '未知'
+        if (format === 'JPEG') format = 'JPG'
+        else if (format === 'PNG') format = 'PNG'
+        else if (format === 'GIF') format = 'GIF'
+        else if (format === 'WEBP') format = 'WEBP'
+        return format
+    } catch (err) {
+        return '未知'
     }
 }
 
-export class gifConverter extends plugin {
+/**
+ * 使用 ffmpeg 将 GIF 分解为 PNG 序列
+ * @param {string} inputGifPath 输入 GIF 文件路径
+ * @param {string} outputDir 输出目录
+ * @param {number} maxFrames 最大帧数限制
+ * @returns {Promise<string[]>} 生成的 PNG 文件路径列表（已排序）
+ */
+async function decomposeGifToPngs(inputGifPath, outputDir, maxFrames = 100) {
+    await fs.mkdir(outputDir, { recursive: true })
+    const outputPattern = path.join(outputDir, '%d.png')
+    const cmd = `ffmpeg -i "${inputGifPath}" -frames:v ${maxFrames} -f image2 "${outputPattern}"`
+    try {
+        await execPromise(cmd, { timeout: 30000 })
+    } catch (err) {
+        throw new Error(`ffmpeg 分解失败: ${err.message}`)
+    }
+    const files = await fs.readdir(outputDir)
+    const pngFiles = files
+        .filter(f => f.endsWith('.png'))
+        .map(f => ({
+            name: f,
+            num: parseInt(path.basename(f, '.png'), 10)
+        }))
+        .sort((a, b) => a.num - b.num)
+        .map(item => path.join(outputDir, item.name))
+    if (pngFiles.length === 0) {
+        throw new Error('未生成任何 PNG 帧')
+    }
+    return pngFiles
+}
+
+/**
+ * 递归删除目录
+ * @param {string} dirPath 目录路径
+ */
+async function removeDir(dirPath) {
+    try {
+        await fs.rm(dirPath, { recursive: true, force: true })
+    } catch (e) {
+        // 忽略清理错误
+    }
+}
+
+export class decomposeGif extends plugin {
     constructor() {
         super({
-            name: '视频转GIF插件',
-            dsc: '将视频转为GIF动图（fps=12，宽度320，lanczos算法）',
+            name: '动图分解',
             event: 'message',
-            priority: 310,
+            priority: 1000,
             rule: [
-                {
-                    reg: /^#(转动图|转gif)$/i,
-                    fnc: 'convertToGif'
-                }
+                { reg: /^#?动图分解$/, fnc: 'decomposeGif' },      // 原命令
+                { reg: /^#?gif分解$/i, fnc: 'decomposeGif' }       // 新命令，忽略大小写
             ]
         })
     }
 
-    // ================= 媒体提取 =================
-
-    extractVideoFromMsg(messageArray) {
-        if (!Array.isArray(messageArray)) return []
-        return messageArray.filter(seg => seg.type === 'video')
-    }
-
-    async getReplyMsg(e) {
-        let replyId = null
+    // 从引用消息中获取回复的原消息
+    async getReplyByMsgId(e) {
+        let replyId
         for (const msg of e.message || []) {
             if (msg.type === 'reply') {
                 replyId = msg.id
@@ -99,9 +124,10 @@ export class gifConverter extends plugin {
         try {
             const rawMessage = await e.bot.sendApi('get_msg', { message_id: replyId })
             if (!rawMessage || !rawMessage.message) return null
+            logger.info(`获取到引用消息：\n${JSON.stringify(rawMessage, null, 4)}`)
             return rawMessage
         } catch (error) {
-            logger.error(`[GIF转换] 获取引用消息失败: ${error}`)
+            logger.error(`通过 replyId 获取消息失败: ${error}`)
             return null
         }
     }
@@ -112,116 +138,164 @@ export class gifConverter extends plugin {
             const messages = await e.group.getChatHistory(e.source.seq, 1)
             const rawMessage = messages.pop()
             if (!rawMessage || !rawMessage.message) return null
+            logger.info(`通过 source 获取到消息：\n${JSON.stringify(rawMessage, null, 4)}`)
             return rawMessage
         } catch (error) {
-            logger.error(`[GIF转换] 通过source获取消息失败: ${error}`)
+            logger.error(`通过 source 获取消息失败: ${error}`)
             return null
         }
     }
 
-    async getQuotedMessage(e) {
-        const replyMsg = await this.getReplyMsg(e)
+    async getReplyMsg(e) {
+        const replyMsg = await this.getReplyByMsgId(e)
         if (replyMsg) return replyMsg
-        return await this.getReplyBySource(e)
+        const sourceMsg = await this.getReplyBySource(e)
+        if (sourceMsg) return sourceMsg
+        return null
     }
 
-    async getTargetVideo(e) {
-        let videoSegments = []
-
-        const quoted = await this.getQuotedMessage(e)
-        if (quoted && quoted.message) {
-            videoSegments = this.extractVideoFromMsg(quoted.message)
-        }
-
-        if (videoSegments.length === 0) {
-            videoSegments = this.extractVideoFromMsg(e.message)
-        }
-
-        if (videoSegments.length === 0) return null
-
-        const seg = videoSegments[0]
-        const data = seg.data || {}
-        let fileUrl = data.url || data.file
-        if (!fileUrl) return null
-
-        let fileName = data.filename || ''
-        if (!fileName && fileUrl) {
-            const urlPath = fileUrl.split('?')[0]
-            fileName = path.basename(urlPath)
-        }
-
-        let fileSize = data.file_size ? parseInt(data.file_size) : null
-        return {
-            segment: seg,
-            fileUrl,
-            fileName: fileName || 'video.mp4',
-            fileSize,
-        }
+    extractImagesFromMsg(messageArray) {
+        if (!Array.isArray(messageArray)) return []
+        return messageArray.filter(seg => seg.type === 'image')
     }
 
-    // ================= FFmpeg 转换 =================
-
-    async runFFmpeg(cmd, timeoutMs = 120000) {
-        logger.info(`[GIF转换] 执行命令: ${cmd}`)
-        try {
-            const { stdout, stderr } = await execPromise(cmd, { timeout: timeoutMs, maxBuffer: 50 * 1024 * 1024 })
-            if (stderr && !stderr.includes('frame=') && !stderr.includes('size=')) {
-                logger.warn(`[GIF转换] stderr: ${stderr.slice(0, 300)}`)
+    /**
+     * 获取图片显示名称（用于错误提示）
+     */
+    _getFullDisplayName(imgSegment, idx) {
+        const data = imgSegment.data || {}
+        if (data.filename && typeof data.filename === 'string') {
+            return data.filename
+        }
+        if (data.file && typeof data.file === 'string') {
+            const base = path.basename(data.file)
+            if (base && base !== '/' && base !== '\\') {
+                return base
             }
-            return { stdout, stderr }
-        } catch (err) {
-            logger.error(`[GIF转换] 命令失败: ${err.message}`)
-            throw new Error(`FFmpeg处理失败: ${err.stderr || err.message}`)
         }
+        if (data.url && typeof data.url === 'string') {
+            try {
+                const urlWithoutQuery = data.url.split('?')[0]
+                const urlBase = path.basename(urlWithoutQuery)
+                if (urlBase && urlBase.length > 0 && urlBase !== '/') {
+                    return decodeURIComponent(urlBase)
+                }
+            } catch (e) {}
+        }
+        return `图片_${idx + 1}`
     }
 
-    async convertToGifFile(inputPath, outputPath) {
-        const filter = "fps=12,scale=320:-1:flags=lanczos"
-        const cmd = `ffmpeg -i "${inputPath}" -vf "${filter}" -loop 0 "${outputPath}" -y`
-        await this.runFFmpeg(cmd, 180000)
-        return outputPath
-    }
+    async decomposeGif(e) {
+        let images = []
 
-    // ================= 命令处理 =================
+        // 1. 获取引用或当前消息中的图片
+        const replyMsg = await this.getReplyMsg(e)
+        if (replyMsg && replyMsg.message) {
+            images = this.extractImagesFromMsg(replyMsg.message)
+        }
 
-    async convertToGif(e) {
-        let inputTempPath = null
-        let outputTempPath = null
+        if (images.length === 0 && e.message) {
+            images = this.extractImagesFromMsg(e.message)
+        }
+
+        if (images.length === 0) {
+            return e.reply('❌ 请回复或引用一条包含 GIF 图片的消息，或直接发送带有 GIF 的命令。', true)
+        }
+
+        // 只处理第一张图片
+        const targetImg = images[0]
+        const url = targetImg.data?.url
+        if (!url) {
+            return e.reply(`❌ 无法获取图片 URL`, true)
+        }
+
+        let tempGifPath = null
+        let outputDir = null
+
         try {
-            // 发送处理提示
-            const hintMsg = await e.reply('⏳ 正在将视频转为GIF，请稍等... (较大文件可能需要数十秒)')
+            // 2. 下载图片
+            await e.reply(`⏳ 正在下载图片并检测格式...`, true)
+            tempGifPath = await downloadImageToTemp(url)
 
-            const video = await this.getTargetVideo(e)
-            if (!video) {
-                await e.reply('❌ 请回复或发送一个视频文件（支持 mp4, mkv, avi, mov 等），例如：回复一条视频消息并发送 #转动图')
-                return true
+            // 3. 检测格式（仅支持 GIF）
+            const format = await getImageFormatByFfprobe(tempGifPath)
+            if (format !== 'GIF') {
+                return e.reply(`❌ 该图片格式为 ${format}，仅支持 GIF 动图分解。`, true)
             }
-            logger.info(`[GIF转换] 开始处理: ${video.fileName}`)
 
-            // 下载视频
-            inputTempPath = getTempFilePath(path.extname(video.fileName) || '.mp4')
-            await downloadFile(video.fileUrl, inputTempPath)
-            const stat = await fs.promises.stat(inputTempPath)
-            logger.info(`[GIF转换] 下载完成，大小: ${formatSizeMB(stat.size)}`)
+            // 4. 创建临时输出目录
+            const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`
+            outputDir = path.join(os.tmpdir(), 'ffmpeg_decompose', uniqueId)
 
-            // 转换GIF
-            outputTempPath = getTempFilePath('.gif')
-            await this.convertToGifFile(inputTempPath, outputTempPath)
-            const outStat = await fs.promises.stat(outputTempPath)
-            logger.info(`[GIF转换] GIF生成完成，大小: ${formatSizeMB(outStat.size)}`)
+            // 5. 分解 GIF（最多 100 帧）
+            const maxFrames = 100
+            await e.reply(`⏳ 正在分解 GIF...\n温馨提醒（最多 ${maxFrames} 帧）`, true)
+            const pngFiles = await decomposeGifToPngs(tempGifPath, outputDir, maxFrames)
 
-            // 发送GIF
-            await e.reply(segment.image(outputTempPath))
-            logger.info(`[GIF转换] GIF发送成功`)
+            const totalFrames = pngFiles.length
+            if (totalFrames === 0) {
+                return e.reply('❌ 分解后未生成任何图片帧。', true)
+            }
 
-            // 可选：撤回提示消息（无需额外处理）
+            // 6. 将所有帧读取为 Base64（避免文件锁定）
+            const base64Frames = []
+            for (const pngPath of pngFiles) {
+                const base64Data = await fs.readFile(pngPath, 'base64')
+                base64Frames.push(base64Data)
+            }
+
+            // 7. 构建合并转发消息（标准 node 格式，支持私聊和群聊）
+            const forwardMessages = []
+            for (let i = 0; i < totalFrames; i++) {
+                const frameNum = i + 1
+                forwardMessages.push({
+                    type: 'node',
+                    data: {
+                        name: '动图分解助手',
+                        uin: e.bot.uin || e.self_id || 10000,
+                        content: [
+                            { type: 'text', data: { text: `第 ${frameNum} 帧\n` } },
+                            { type: 'image', data: { file: `base64://${base64Frames[i]}` } }
+                        ]
+                    }
+                })
+            }
+
+            // 8. 准备 API 参数（根据聊天类型填充 id）
+            const apiParams = { messages: forwardMessages }
+            if (e.isGroup || e.group_id) {
+                apiParams.group_id = e.group_id || e.group?.group_id
+            } else {
+                apiParams.user_id = e.user_id
+            }
+
+            // 9. 发送合并转发
+            try {
+                await e.bot.sendApi('send_forward_msg', apiParams)
+                await e.reply(`✅ 分解完成，共 ${totalFrames} 帧。`, true)
+            } catch (forwardErr) {
+                logger.error('合并转发失败，降级为逐张发送:', forwardErr)
+                await e.reply(`⚠️ 合并转发失败，改为逐张发送（共 ${totalFrames} 帧）`, true)
+                for (let i = 0; i < totalFrames; i++) {
+                    await e.reply([
+                        { type: 'text', data: { text: `第 ${i+1} 帧` } },
+                        { type: 'image', data: { file: `base64://${base64Frames[i]}` } }
+                    ])
+                    await new Promise(r => setTimeout(r, 500))
+                }
+            }
+
         } catch (err) {
-            logger.error(`[GIF转换] 失败: ${err.message}`)
-            await e.reply(`❌ 转动图失败: ${err.message}`)
+            logger.error(`动图分解失败: ${err.message}`)
+            await e.reply(`❌ 处理失败：${err.message}`, true)
         } finally {
-            await cleanupTempFile(inputTempPath)
-            await cleanupTempFile(outputTempPath)
+            // 清理临时文件
+            if (tempGifPath) {
+                await fs.unlink(tempGifPath).catch(() => {})
+            }
+            if (outputDir) {
+                await removeDir(outputDir).catch(() => {})
+            }
         }
-        return true
     }
 }

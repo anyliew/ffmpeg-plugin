@@ -73,7 +73,7 @@ export class gifConverter extends plugin {
             priority: 310,
             rule: [
                 {
-                    reg: '^#转动图$',
+                    reg: /^#(转动图|转gif)$/i,
                     fnc: 'convertToGif'
                 }
             ]
