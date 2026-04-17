@@ -1,3 +1,5 @@
+![ffmpeg-plugin](https://socialify.git.ci/anyliew/ffmpeg-plugin/image?description=1&forks=1&issues=1&language=1&name=1&owner=1&pulls=1&stargazers=1&theme=Light)
+
 # ffmpeg-plugin
 
 基于 FFmpeg 的 Yunzai-Bot 多媒体处理插件，提供音视频处理、信息查询、去黑边、GIF 分解/打包、帮助菜单等功能。

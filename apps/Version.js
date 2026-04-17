@@ -73,13 +73,14 @@ function getEnabledFeatures(versionOutput) {
 }
 
 /**
- * 获取插件目录的 git log 最近5条
+ * 获取插件目录的 git log 最近5条（带完整日期时间）
  */
 async function getGitLogDetailed(pluginDir) {
   try {
     await execPromise('git rev-parse --is-inside-work-tree', { cwd: pluginDir })
+    // 修改点：将 --date=short 替换为 --date=format-local:'%Y-%m-%d %H:%M:%S' 以显示时分秒
     const { stdout } = await execPromise(
-      'git log -n 5 --pretty=format:"%h|%s|%an|%ad" --date=short',
+      'git log -n 5 --pretty=format:"%h|%s|%an|%ad" --date=format-local:\'%Y-%m-%d %H:%M:%S\'',
       { cwd: pluginDir }
     )
     if (!stdout.trim()) return []
@@ -245,15 +246,15 @@ function buildHtml(versionRaw, versionNumber, commits) {
             margin-top: 0;
             display: flex;
             flex-wrap: wrap;
-            gap: 0.6rem;
+            gap: 0.8rem;
         }
 
         .config-chip {
             background: #f8fafc;
             border: 1px solid #dfe8f0;
             border-radius: 2rem;
-            padding: 0.3rem 1rem;
-            font-size: 0.85rem;
+            padding: 0.5rem 1.2rem;
+            font-size: 1rem;
             font-family: monospace;
             color: #1f5e7e;
         }
@@ -305,8 +306,8 @@ function buildHtml(versionRaw, versionNumber, commits) {
 
         .codec-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-            gap: 1rem;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 1.2rem;
         }
 
         .codec-category {
@@ -317,7 +318,7 @@ function buildHtml(versionRaw, versionNumber, commits) {
         }
 
         .codec-category h3 {
-            font-size: 1.1rem;
+            font-size: 1.2rem;
             font-weight: 700;
             margin-bottom: 0.8rem;
             color: #1c5a78;
@@ -326,14 +327,14 @@ function buildHtml(versionRaw, versionNumber, commits) {
         .codec-list {
             display: flex;
             flex-wrap: wrap;
-            gap: 0.6rem;
+            gap: 0.8rem;
         }
 
         .codec-badge {
             background: #e7f0f9;
-            padding: 0.3rem 1rem;
+            padding: 0.5rem 1.2rem;
             border-radius: 1.5rem;
-            font-size: 0.85rem;
+            font-size: 1rem;
             font-weight: 500;
             font-family: monospace;
             color: #146b8a;
@@ -385,7 +386,7 @@ function buildHtml(versionRaw, versionNumber, commits) {
         </div>
     </div>
 
-    <!-- 顺序2: 插件更新记录 (最近5条) -->
+    <!-- 顺序2: 插件更新记录 (最近5条，含完整日期时间) -->
     <div class="card">
         <div class="card-header">
             <div class="icon">📝</div>
@@ -504,8 +505,6 @@ export class ffmpegVersion extends plugin {
   }
 
   async getFfmpegInfo(e) {
-    const waitMsg = await e.reply('🔍 正在查询 FFmpeg 信息，请稍候...', true)
-
     try {
       const versionRaw = await getFfmpegVersionInfo()
       const versionNumber = extractVersionNumber(versionRaw)
@@ -531,12 +530,6 @@ export class ffmpegVersion extends plugin {
           await fs.unlink(imagePath)
         } catch (ignore) {}
       }, 5000)
-
-      if (waitMsg && waitMsg.message_id) {
-        try {
-          await e.bot.sendApi('delete_msg', { message_id: waitMsg.message_id })
-        } catch (ignore) {}
-      }
     } catch (err) {
       logger.error('查询 FFmpeg 信息失败:', err)
       await e.reply(`❌ 查询失败: ${err.message}`, true)
