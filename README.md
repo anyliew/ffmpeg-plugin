@@ -22,10 +22,11 @@
 
 > 💡 使用方法：回复/引用包含媒体的消息，或直接发送带有媒体的命令。
 
-### ✂️ 去黑边
+### ✂️ 去黑边 / 去白边
 | 命令 | 功能 |
 |------|------|
 | `#去黑边` | 自动检测并裁剪图片/视频四周的黑边 |
+| `#去白边` | 自动检测并裁剪图片/视频四周的白边 |
 
 > 💡 支持图片和视频，可批量处理（最多10个）。
 
@@ -36,6 +37,8 @@
 | `#动图分解` / `#gif分解` | 将 GIF 动图分解为 PNG 帧序列（合并转发，最多100帧） |
 | `#动图打包` / `#gif打包` | 将 GIF 动图的所有帧打包为 ZIP 压缩包 |
 | `#转语音` | 提取视频中的音频并转换为 MP3 语音消息 |
+| `#转mp3` | 将音/视频文件转换为 MP3 音频文件 |
+| `#转flac` | 将音/视频文件转换为 FLAC 无损音频文件 |
 
 ### ❓ 帮助菜单
 | 命令 | 功能 |
@@ -53,18 +56,13 @@ pnpm i
 ```
 
 ## 环境依赖
+FFmpeg：必须安装并加入系统 PATH（插件依赖 ffmpeg 和 ffprobe 命令）
 
-- **FFmpeg**：必须安装并加入系统 PATH（插件依赖 `ffmpeg` 和 `ffprobe` 命令）
-  - Windows：下载 [FFmpeg](https://ffmpeg.org/download.html) 并配置环境变量
-  - Linux：`sudo apt install ffmpeg` 或 `yum install ffmpeg`
-  - macOS：`brew install ffmpeg`
+Windows：下载 FFmpeg 并配置环境变量
 
-## 注意事项
+Linux：sudo apt install ffmpeg 或 yum install ffmpeg
 
-- 所有命令均支持大小写（例如 `#FF帮助` 同样有效）。
-- 处理大型媒体文件时可能需要较长时间，请耐心等待。
-- 去黑边功能依赖 `sharp` 库处理图片，视频处理依赖 FFmpeg。
+macOS：brew install ffmpeg
 
 ## 致谢
-
-- [FFmpeg](https://ffmpeg.org/) - 多媒体处理核心
+FFmpeg - 多媒体处理核心

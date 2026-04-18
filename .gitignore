@@ -3,3 +3,5 @@ data/*
 .node_modules
 node_modules
 pnpm-lock.yaml
+README.assets/
+README.assets
