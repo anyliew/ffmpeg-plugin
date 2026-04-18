@@ -159,7 +159,6 @@ export class mediaTool extends plugin {
 
         for (const file of files) {
             const data = file.data || {}
-            // 获取文件名：优先 filename，其次 file，最后尝试从 url 解析
             let fileName = data.filename || data.file || ''
             if (!fileName && data.url) {
                 const urlPath = data.url.split('?')[0]
@@ -180,14 +179,11 @@ export class mediaTool extends plugin {
         return videos
     }
 
-    // 提取音频文件（支持常见音频格式和视频文件中的音频流）
     extractAudioFromMsg(messageArray) {
         if (!Array.isArray(messageArray)) return []
         const audioSegments = []
-        // 直接从 audio 类型消息获取
         const directAudios = messageArray.filter(seg => seg.type === 'audio')
         audioSegments.push(...directAudios)
-        // 从 file 类型中筛选音频扩展名
         const files = messageArray.filter(seg => seg.type === 'file')
         const audioExts = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus']
         for (const file of files) {
@@ -322,7 +318,6 @@ export class mediaTool extends plugin {
         }
     }
 
-    // 获取目标音频（优先从引用消息，否则从当前消息）
     async getTargetAudio(e) {
         let audioSegments = []
         const quoted = await this.getQuotedMessageRaw(e)
@@ -381,7 +376,6 @@ export class mediaTool extends plugin {
         return { segment: targetImg, url }
     }
 
-    // 通用的媒体获取：先尝试视频，再尝试音频（用于转码）
     async getTargetMediaForTranscode(e) {
         const video = await this.getTargetVideo(e)
         if (video) return { type: 'video', ...video }
@@ -425,13 +419,11 @@ export class mediaTool extends plugin {
         return outputPath
     }
 
-    // 发送文件消息（优先 file://，失败时回退 base64://）
     async sendFileAsMessage(e, filePath, displayName) {
         const stat = await fs.promises.stat(filePath)
         const fileSizeMB = (stat.size / (1024 * 1024)).toFixed(2)
         logger.info(`[多媒体插件] 准备发送文件: ${displayName}, 大小 ${fileSizeMB} MB`)
 
-        // 方式1: 尝试使用本地文件路径（file://）
         try {
             const fileMessage = {
                 type: 'file',
@@ -452,7 +444,6 @@ export class mediaTool extends plugin {
             logger.warn(`[多媒体插件] file:// 发送失败: ${err.message}, 尝试 base64 回退`)
         }
 
-        // 方式2: 回退 base64 编码
         try {
             const fileBuffer = await fs.promises.readFile(filePath)
             const base64Data = fileBuffer.toString('base64')
@@ -477,15 +468,44 @@ export class mediaTool extends plugin {
         }
     }
 
+    // ================= 错误处理（合并转发优先） =================
+
+    async sendErrorAsForward(e, errorMessage) {
+        const forwardMsg = [
+            {
+                type: 'node',
+                data: {
+                    name: '小助手',
+                    uin: e.bot.uin || e.self_id || 10000,
+                    content: [{ type: 'text', data: { text: `❌ ${errorMessage}` } }]
+                }
+            }
+        ]
+        try {
+            const apiParams = { messages: forwardMsg }
+            if (e.isGroup || e.group_id) {
+                apiParams.group_id = e.group_id || e.group?.group_id
+            } else {
+                apiParams.user_id = e.user_id
+            }
+            await e.bot.sendApi('send_forward_msg', apiParams)
+            return true
+        } catch (err) {
+            logger.warn(`[多媒体插件] 合并转发错误消息失败，降级为普通消息: ${err.message}`)
+            await e.reply(`❌ ${errorMessage}`, true)
+            return false
+        }
+    }
+
     // ================= 功能实现 =================
 
     async convertToGif(e) {
         let inputTempPath = null, outputTempPath = null
         try {
-            await e.reply('⏳ 正在将视频转为GIF，请稍等... (较大文件可能需要数十秒)')
+            await e.reply('⏳ 正在将视频转为GIF，请稍等...')
             const video = await this.getTargetVideo(e)
             if (!video) {
-                await e.reply('❌ 请回复或发送一个视频文件（支持 mp4, mkv, avi, mov 等），例如：回复一条视频消息并发送 #转动图')
+                await this.sendErrorAsForward(e, '请回复或发送一个视频文件（支持 mp4, mkv, avi, mov 等），例如：回复一条视频消息并发送 #转动图')
                 return true
             }
             logger.info(`[GIF转换] 开始处理: ${video.fileName}`)
@@ -501,7 +521,7 @@ export class mediaTool extends plugin {
             logger.info(`[GIF转换] GIF发送成功`)
         } catch (err) {
             logger.error(`[GIF转换] 失败: ${err.message}`)
-            await e.reply(`❌ 转动图失败: ${err.message}`)
+            await this.sendErrorAsForward(e, `转动图失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)
@@ -514,30 +534,48 @@ export class mediaTool extends plugin {
         try {
             const targetImage = await this.getTargetImage(e)
             if (!targetImage) {
-                return e.reply('❌ 请回复或引用一条包含 GIF 图片的消息，或直接发送带有 GIF 的命令。', true)
+                await this.sendErrorAsForward(e, '请回复或引用一条包含 GIF 图片的消息，或直接发送带有 GIF 的命令。')
+                return true
             }
-            await e.reply(`⏳ 正在下载图片并检测格式...`, true)
             tempGifPath = await downloadImageToTemp(targetImage.url)
             const format = await getImageFormatByFfprobe(tempGifPath)
             if (format !== 'GIF') {
-                return e.reply(`❌ 该图片格式为 ${format}，仅支持 GIF 动图分解。`, true)
+                await this.sendErrorAsForward(e, `该图片格式为 ${format}，仅支持 GIF 动图分解。`)
+                return true
             }
             const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`
             outputDir = path.join(os.tmpdir(), 'ffmpeg_decompose', uniqueId)
             const maxFrames = 100
-            await e.reply(`⏳ 正在分解 GIF...\n温馨提醒（最多 ${maxFrames} 帧）`, true)
             const pngFiles = await decomposeGifToPngs(tempGifPath, outputDir, maxFrames)
             const totalFrames = pngFiles.length
             if (totalFrames === 0) {
-                return e.reply('❌ 分解后未生成任何图片帧。', true)
+                await this.sendErrorAsForward(e, '分解后未生成任何图片帧。')
+                return true
             }
-            const base64Frames = []
-            for (const pngPath of pngFiles) {
-                const base64Data = await fs.promises.readFile(pngPath, 'base64')
-                base64Frames.push(base64Data)
-            }
+
+            // 构建合并转发消息节点
             const forwardMessages = []
+            // 节点1：下载检测提示
+            forwardMessages.push({
+                type: 'node',
+                data: {
+                    name: '小助手',
+                    uin: e.bot.uin || e.self_id || 10000,
+                    content: [{ type: 'text', data: { text: '⏳ 正在下载图片并检测格式...' } }]
+                }
+            })
+            // 节点2：分解提示（含温馨提醒）
+            forwardMessages.push({
+                type: 'node',
+                data: {
+                    name: '小助手',
+                    uin: e.bot.uin || e.self_id || 10000,
+                    content: [{ type: 'text', data: { text: `⏳ 正在分解 GIF...\n温馨提醒（最多 ${maxFrames} 帧）` } }]
+                }
+            })
+            // 后续节点：每一帧图片 + 文字说明
             for (let i = 0; i < totalFrames; i++) {
+                const base64Data = await fs.promises.readFile(pngFiles[i], 'base64')
                 forwardMessages.push({
                     type: 'node',
                     data: {
@@ -545,11 +583,21 @@ export class mediaTool extends plugin {
                         uin: e.bot.uin || e.self_id || 10000,
                         content: [
                             { type: 'text', data: { text: `第 ${i+1} 帧\n` } },
-                            { type: 'image', data: { file: `base64://${base64Frames[i]}` } }
+                            { type: 'image', data: { file: `base64://${base64Data}` } }
                         ]
                     }
                 })
             }
+            // 最后一个节点：完成信息
+            forwardMessages.push({
+                type: 'node',
+                data: {
+                    name: '小助手',
+                    uin: e.bot.uin || e.self_id || 10000,
+                    content: [{ type: 'text', data: { text: `✅ 分解完成，共 ${totalFrames} 帧。` } }]
+                }
+            })
+
             const apiParams = { messages: forwardMessages }
             if (e.isGroup || e.group_id) {
                 apiParams.group_id = e.group_id || e.group?.group_id
@@ -558,21 +606,24 @@ export class mediaTool extends plugin {
             }
             try {
                 await e.bot.sendApi('send_forward_msg', apiParams)
-                await e.reply(`✅ 分解完成，共 ${totalFrames} 帧。`, true)
             } catch (forwardErr) {
                 logger.error('合并转发失败，降级为逐张发送:', forwardErr)
-                await e.reply(`⚠️ 合并转发失败，改为逐张发送（共 ${totalFrames} 帧）`, true)
+                // 降级：先发送两个文本提示
+                await e.reply('⏳ 正在下载图片并检测格式...\n⏳ 正在分解 GIF...\n温馨提醒（最多 100 帧）', true)
+                // 逐张发送图片
                 for (let i = 0; i < totalFrames; i++) {
+                    const base64Data = await fs.promises.readFile(pngFiles[i], 'base64')
                     await e.reply([
                         { type: 'text', data: { text: `第 ${i+1} 帧` } },
-                        { type: 'image', data: { file: `base64://${base64Frames[i]}` } }
+                        { type: 'image', data: { file: `base64://${base64Data}` } }
                     ])
                     await new Promise(r => setTimeout(r, 500))
                 }
+                await e.reply(`✅ 分解完成，共 ${totalFrames} 帧。`, true)
             }
         } catch (err) {
             logger.error(`动图分解失败: ${err.message}`)
-            await e.reply(`❌ 处理失败：${err.message}`, true)
+            await this.sendErrorAsForward(e, `处理失败：${err.message}`)
         } finally {
             if (tempGifPath) await cleanupTempFile(tempGifPath).catch(() => {})
             if (outputDir) await removePath(outputDir).catch(() => {})
@@ -584,34 +635,28 @@ export class mediaTool extends plugin {
         try {
             const targetImage = await this.getTargetImage(e)
             if (!targetImage) {
-                return e.reply('❌ 请回复或引用一条包含 GIF 图片的消息，或直接发送带有 GIF 的命令。', true)
+                await this.sendErrorAsForward(e, '请回复或引用一条包含 GIF 图片的消息，或直接发送带有 GIF 的命令。')
+                return true
             }
-            await e.reply(`⏳ 正在下载图片并检测格式...`, true)
             tempGifPath = await downloadImageToTemp(targetImage.url)
             const format = await getImageFormatByFfprobe(tempGifPath)
             if (format !== 'GIF') {
-                return e.reply(`❌ 该图片格式为 ${format}，仅支持 GIF 动图打包。`, true)
+                await this.sendErrorAsForward(e, `该图片格式为 ${format}，仅支持 GIF 动图打包。`)
+                return true
             }
             const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`
             outputDir = path.join(os.tmpdir(), 'ffmpeg_decompose', uniqueId)
             const maxFrames = 300
-            await e.reply(`⏳ 正在分解 GIF（最多 ${maxFrames} 帧）...`, true)
             const pngFiles = await decomposeGifToPngs(tempGifPath, outputDir, maxFrames)
             const totalFrames = pngFiles.length
-            await e.reply(`⏳ 正在打包 ${totalFrames} 帧为 ZIP 文件...`, true)
             zipFilePath = path.join(os.tmpdir(), `gif_frames_${uniqueId}.zip`)
             await packPngsToZip(pngFiles, zipFilePath)
-            const fileSize = (await fs.promises.stat(zipFilePath)).size
-            const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2)
-            
-            // 使用 sendFileAsMessage 发送 ZIP 文件（支持 file:// 优先，回退 base64://）
             const displayName = `gif_frames_${uniqueId}.zip`
             await this.sendFileAsMessage(e, zipFilePath, displayName)
-            
-            await e.reply(`✅ 打包完成！共 ${totalFrames} 帧，压缩包大小 ${fileSizeMB} MB。`, true)
+            // 不发送任何文本提示
         } catch (err) {
             logger.error(`动图打包失败: ${err.message}`)
-            await e.reply(`❌ 处理失败：${err.message}`, true)
+            await this.sendErrorAsForward(e, `处理失败：${err.message}`)
         } finally {
             if (tempGifPath) await cleanupTempFile(tempGifPath).catch(() => {})
             if (outputDir) await removePath(outputDir).catch(() => {})
@@ -625,7 +670,7 @@ export class mediaTool extends plugin {
             await e.reply('⏳ 正在将视频转为语音，请稍等...')
             const video = await this.getTargetVideo(e)
             if (!video) {
-                await e.reply('❌ 请回复或发送一个视频文件（mp4, mkv, avi, mov等），然后发送 #转语音')
+                await this.sendErrorAsForward(e, '请回复或发送一个视频文件（mp4, mkv, avi, mov等），然后发送 #转语音')
                 return true
             }
             logger.info(`[转语音] 开始处理: ${video.fileName}`)
@@ -641,7 +686,7 @@ export class mediaTool extends plugin {
             logger.info(`[转语音] MP3语音消息发送成功`)
         } catch (err) {
             logger.error(`[转语音] 失败: ${err.message}`)
-            await e.reply(`❌ 转语音失败: ${err.message}`)
+            await this.sendErrorAsForward(e, `转语音失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)
@@ -649,14 +694,13 @@ export class mediaTool extends plugin {
         return true
     }
 
-    // 新增：转 MP3 文件
     async convertToMp3(e) {
         let inputTempPath = null, outputTempPath = null
         try {
             await e.reply('⏳ 正在将音视频转为 MP3 文件，请稍等...')
             const media = await this.getTargetMediaForTranscode(e)
             if (!media) {
-                await e.reply('❌ 请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转mp3')
+                await this.sendErrorAsForward(e, '请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转mp3')
                 return true
             }
             logger.info(`[转MP3] 开始处理: ${media.fileName}`)
@@ -668,14 +712,13 @@ export class mediaTool extends plugin {
             await this.convertToMp3File(inputTempPath, outputTempPath)
             const outStat = await fs.promises.stat(outputTempPath)
             logger.info(`[转MP3] MP3 生成完成，大小: ${formatSizeMB(outStat.size)}`)
-            // 发送文件（优先 file://，失败则 base64）
             const outputFileName = path.basename(media.fileName, path.extname(media.fileName)) + '.mp3'
             await this.sendFileAsMessage(e, outputTempPath, outputFileName)
             logger.info(`[转MP3] 文件发送成功`)
-            await e.reply(`✅ 转换完成！文件大小 ${formatSizeMB(outStat.size)}`)
+            // 不发送完成提示消息
         } catch (err) {
             logger.error(`[转MP3] 失败: ${err.message}`)
-            await e.reply(`❌ 转 MP3 失败: ${err.message}`)
+            await this.sendErrorAsForward(e, `转 MP3 失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)
@@ -683,14 +726,13 @@ export class mediaTool extends plugin {
         return true
     }
 
-    // 新增：转 FLAC 文件
     async convertToFlac(e) {
         let inputTempPath = null, outputTempPath = null
         try {
             await e.reply('⏳ 正在将音视频转为 FLAC 文件，请稍等...')
             const media = await this.getTargetMediaForTranscode(e)
             if (!media) {
-                await e.reply('❌ 请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转flac')
+                await this.sendErrorAsForward(e, '请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转flac')
                 return true
             }
             logger.info(`[转FLAC] 开始处理: ${media.fileName}`)
@@ -705,10 +747,10 @@ export class mediaTool extends plugin {
             const outputFileName = path.basename(media.fileName, path.extname(media.fileName)) + '.flac'
             await this.sendFileAsMessage(e, outputTempPath, outputFileName)
             logger.info(`[转FLAC] 文件发送成功`)
-            await e.reply(`✅ 转换完成！文件大小 ${formatSizeMB(outStat.size)}`)
+            // 不发送完成提示消息
         } catch (err) {
             logger.error(`[转FLAC] 失败: ${err.message}`)
-            await e.reply(`❌ 转 FLAC 失败: ${err.message}`)
+            await this.sendErrorAsForward(e, `转 FLAC 失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)
