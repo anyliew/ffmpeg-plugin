@@ -265,7 +265,7 @@ async function getVideoInfoByFfprobe(filePath) {
 export class mediaInfo extends plugin {
     constructor() {
         super({
-            name: '媒体信息',
+            name: '[ffmpeg-plugin]媒体信息',
             event: 'message',
             priority: 1000,
             rule: [

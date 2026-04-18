@@ -132,8 +132,8 @@ async function packPngsToZip(pngFiles, zipOutputPath) {
 export class mediaTool extends plugin {
     constructor() {
         super({
-            name: '多媒体工具箱',
-            dsc: '视频转GIF、GIF分解、GIF打包ZIP、视频转语音',
+            name: '[ffmpeg-plugin]多媒体工具箱',
+            dsc: '视频转GIF、GIF分解、GIF打包ZIP、视频转语音、音视频转MP3/FLAC',
             event: 'message',
             priority: 310,
             rule: [
@@ -141,7 +141,9 @@ export class mediaTool extends plugin {
                 { reg: /^#?动图分解$/, fnc: 'decomposeGif' },
                 { reg: /^#?gif分解$/i, fnc: 'decomposeGif' },
                 { reg: '^#?(动图打包|gif打包)$', fnc: 'packGifToZip' },
-                { reg: '^#转语音$', fnc: 'convertToVoice' }
+                { reg: '^#转语音$', fnc: 'convertToVoice' },
+                { reg: '^#转mp3$', fnc: 'convertToMp3' },
+                { reg: '^#转flac$', fnc: 'convertToFlac' }
             ]
         })
     }
@@ -176,6 +178,31 @@ export class mediaTool extends plugin {
         }
         logger.info(`[DEBUG] 最终视频段数量: ${videos.length}`)
         return videos
+    }
+
+    // 提取音频文件（支持常见音频格式和视频文件中的音频流）
+    extractAudioFromMsg(messageArray) {
+        if (!Array.isArray(messageArray)) return []
+        const audioSegments = []
+        // 直接从 audio 类型消息获取
+        const directAudios = messageArray.filter(seg => seg.type === 'audio')
+        audioSegments.push(...directAudios)
+        // 从 file 类型中筛选音频扩展名
+        const files = messageArray.filter(seg => seg.type === 'file')
+        const audioExts = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus']
+        for (const file of files) {
+            const data = file.data || {}
+            let fileName = data.filename || data.file || ''
+            if (!fileName && data.url) {
+                const urlPath = data.url.split('?')[0]
+                fileName = path.basename(urlPath)
+            }
+            const ext = path.extname(fileName).toLowerCase()
+            if (audioExts.includes(ext)) {
+                audioSegments.push(file)
+            }
+        }
+        return audioSegments
     }
 
     extractImagesFromMsg(messageArray) {
@@ -295,6 +322,43 @@ export class mediaTool extends plugin {
         }
     }
 
+    // 获取目标音频（优先从引用消息，否则从当前消息）
+    async getTargetAudio(e) {
+        let audioSegments = []
+        const quoted = await this.getQuotedMessageRaw(e)
+        if (quoted && quoted.message) {
+            audioSegments = this.extractAudioFromMsg(quoted.message)
+        }
+        if (audioSegments.length === 0) {
+            audioSegments = this.extractAudioFromMsg(e.message)
+        }
+        if (audioSegments.length === 0) return null
+
+        const seg = audioSegments[0]
+        const data = seg.data || {}
+        let fileUrl
+        try {
+            fileUrl = await this._getMediaUrl(seg, e)
+        } catch (err) {
+            logger.error(`[多媒体插件] 获取音频链接失败: ${err.message}`)
+            return null
+        }
+
+        let fileName = data.filename || data.file || ''
+        if (!fileName && fileUrl) {
+            const urlPath = fileUrl.split('?')[0]
+            fileName = path.basename(urlPath)
+        }
+        if (!fileName) fileName = 'audio.bin'
+
+        return {
+            segment: seg,
+            fileUrl,
+            fileName,
+            fileSize: data.file_size ? parseInt(data.file_size) : null,
+        }
+    }
+
     async getTargetImage(e) {
         let images = []
         const quoted = await this.getQuotedMessageRaw(e)
@@ -315,6 +379,15 @@ export class mediaTool extends plugin {
             return null
         }
         return { segment: targetImg, url }
+    }
+
+    // 通用的媒体获取：先尝试视频，再尝试音频（用于转码）
+    async getTargetMediaForTranscode(e) {
+        const video = await this.getTargetVideo(e)
+        if (video) return { type: 'video', ...video }
+        const audio = await this.getTargetAudio(e)
+        if (audio) return { type: 'audio', ...audio }
+        return null
     }
 
     // ================= FFmpeg 通用 =================
@@ -344,6 +417,64 @@ export class mediaTool extends plugin {
         const cmd = `ffmpeg -i "${inputPath}" -c:a libmp3lame -q:a 2 "${outputPath}" -y`
         await this.runFFmpeg(cmd, 120000)
         return outputPath
+    }
+
+    async convertToFlacFile(inputPath, outputPath) {
+        const cmd = `ffmpeg -i "${inputPath}" -c:a flac "${outputPath}" -y`
+        await this.runFFmpeg(cmd, 120000)
+        return outputPath
+    }
+
+    // 发送文件消息（优先 file://，失败时回退 base64://）
+    async sendFileAsMessage(e, filePath, displayName) {
+        const stat = await fs.promises.stat(filePath)
+        const fileSizeMB = (stat.size / (1024 * 1024)).toFixed(2)
+        logger.info(`[多媒体插件] 准备发送文件: ${displayName}, 大小 ${fileSizeMB} MB`)
+
+        // 方式1: 尝试使用本地文件路径（file://）
+        try {
+            const fileMessage = {
+                type: 'file',
+                data: {
+                    file: `file://${filePath}`,
+                    name: displayName
+                }
+            }
+            await e.bot.sendApi('send_msg', {
+                message_type: e.isGroup ? 'group' : 'private',
+                user_id: e.isGroup ? undefined : e.user_id,
+                group_id: e.isGroup ? (e.group_id || e.group?.group_id) : undefined,
+                message: [fileMessage]
+            })
+            logger.info(`[多媒体插件] 使用 file:// 发送成功`)
+            return true
+        } catch (err) {
+            logger.warn(`[多媒体插件] file:// 发送失败: ${err.message}, 尝试 base64 回退`)
+        }
+
+        // 方式2: 回退 base64 编码
+        try {
+            const fileBuffer = await fs.promises.readFile(filePath)
+            const base64Data = fileBuffer.toString('base64')
+            const fileMessage = {
+                type: 'file',
+                data: {
+                    file: `base64://${base64Data}`,
+                    name: displayName
+                }
+            }
+            await e.bot.sendApi('send_msg', {
+                message_type: e.isGroup ? 'group' : 'private',
+                user_id: e.isGroup ? undefined : e.user_id,
+                group_id: e.isGroup ? (e.group_id || e.group?.group_id) : undefined,
+                message: [fileMessage]
+            })
+            logger.info(`[多媒体插件] 使用 base64:// 发送成功`)
+            return true
+        } catch (err2) {
+            logger.error(`[多媒体插件] base64 发送也失败: ${err2.message}`)
+            throw new Error(`发送文件失败: ${err2.message}`)
+        }
     }
 
     // ================= 功能实现 =================
@@ -472,19 +603,11 @@ export class mediaTool extends plugin {
             await packPngsToZip(pngFiles, zipFilePath)
             const fileSize = (await fs.promises.stat(zipFilePath)).size
             const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2)
-            const fileMessage = {
-                type: 'file',
-                data: {
-                    file: `file://${zipFilePath}`,
-                    name: `gif_frames_${uniqueId}.zip`
-                }
-            }
-            await e.bot.sendApi('send_msg', {
-                message_type: e.isGroup ? 'group' : 'private',
-                user_id: e.isGroup ? undefined : e.user_id,
-                group_id: e.isGroup ? (e.group_id || e.group?.group_id) : undefined,
-                message: [fileMessage]
-            })
+            
+            // 使用 sendFileAsMessage 发送 ZIP 文件（支持 file:// 优先，回退 base64://）
+            const displayName = `gif_frames_${uniqueId}.zip`
+            await this.sendFileAsMessage(e, zipFilePath, displayName)
+            
             await e.reply(`✅ 打包完成！共 ${totalFrames} 帧，压缩包大小 ${fileSizeMB} MB。`, true)
         } catch (err) {
             logger.error(`动图打包失败: ${err.message}`)
@@ -519,6 +642,73 @@ export class mediaTool extends plugin {
         } catch (err) {
             logger.error(`[转语音] 失败: ${err.message}`)
             await e.reply(`❌ 转语音失败: ${err.message}`)
+        } finally {
+            await cleanupTempFile(inputTempPath)
+            await cleanupTempFile(outputTempPath)
+        }
+        return true
+    }
+
+    // 新增：转 MP3 文件
+    async convertToMp3(e) {
+        let inputTempPath = null, outputTempPath = null
+        try {
+            await e.reply('⏳ 正在将音视频转为 MP3 文件，请稍等...')
+            const media = await this.getTargetMediaForTranscode(e)
+            if (!media) {
+                await e.reply('❌ 请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转mp3')
+                return true
+            }
+            logger.info(`[转MP3] 开始处理: ${media.fileName}`)
+            inputTempPath = getTempFilePath(path.extname(media.fileName) || '.bin')
+            await downloadFile(media.fileUrl, inputTempPath)
+            const stat = await fs.promises.stat(inputTempPath)
+            logger.info(`[转MP3] 下载完成，大小: ${formatSizeMB(stat.size)}`)
+            outputTempPath = getTempFilePath('.mp3')
+            await this.convertToMp3File(inputTempPath, outputTempPath)
+            const outStat = await fs.promises.stat(outputTempPath)
+            logger.info(`[转MP3] MP3 生成完成，大小: ${formatSizeMB(outStat.size)}`)
+            // 发送文件（优先 file://，失败则 base64）
+            const outputFileName = path.basename(media.fileName, path.extname(media.fileName)) + '.mp3'
+            await this.sendFileAsMessage(e, outputTempPath, outputFileName)
+            logger.info(`[转MP3] 文件发送成功`)
+            await e.reply(`✅ 转换完成！文件大小 ${formatSizeMB(outStat.size)}`)
+        } catch (err) {
+            logger.error(`[转MP3] 失败: ${err.message}`)
+            await e.reply(`❌ 转 MP3 失败: ${err.message}`)
+        } finally {
+            await cleanupTempFile(inputTempPath)
+            await cleanupTempFile(outputTempPath)
+        }
+        return true
+    }
+
+    // 新增：转 FLAC 文件
+    async convertToFlac(e) {
+        let inputTempPath = null, outputTempPath = null
+        try {
+            await e.reply('⏳ 正在将音视频转为 FLAC 文件，请稍等...')
+            const media = await this.getTargetMediaForTranscode(e)
+            if (!media) {
+                await e.reply('❌ 请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转flac')
+                return true
+            }
+            logger.info(`[转FLAC] 开始处理: ${media.fileName}`)
+            inputTempPath = getTempFilePath(path.extname(media.fileName) || '.bin')
+            await downloadFile(media.fileUrl, inputTempPath)
+            const stat = await fs.promises.stat(inputTempPath)
+            logger.info(`[转FLAC] 下载完成，大小: ${formatSizeMB(stat.size)}`)
+            outputTempPath = getTempFilePath('.flac')
+            await this.convertToFlacFile(inputTempPath, outputTempPath)
+            const outStat = await fs.promises.stat(outputTempPath)
+            logger.info(`[转FLAC] FLAC 生成完成，大小: ${formatSizeMB(outStat.size)}`)
+            const outputFileName = path.basename(media.fileName, path.extname(media.fileName)) + '.flac'
+            await this.sendFileAsMessage(e, outputTempPath, outputFileName)
+            logger.info(`[转FLAC] 文件发送成功`)
+            await e.reply(`✅ 转换完成！文件大小 ${formatSizeMB(outStat.size)}`)
+        } catch (err) {
+            logger.error(`[转FLAC] 失败: ${err.message}`)
+            await e.reply(`❌ 转 FLAC 失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)

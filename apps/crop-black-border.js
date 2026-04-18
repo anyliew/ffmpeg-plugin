@@ -174,6 +174,61 @@ async function cropMediaWithFFmpeg(inputPath, outputPath, type) {
     }
 }
 
+// ========== 新增：去白边处理函数 ==========
+async function cropMediaWithFFmpegWhite(inputPath, outputPath, type) {
+    if (type === 'image') {
+        try {
+            console.log(`[去白边] 使用 sharp 处理图片: ${inputPath}`)
+            await sharp(inputPath)
+                .trim({ threshold: 16 })   // 同样使用阈值16，去除边缘相近色（白边）
+                .toFile(outputPath)
+            console.log(`[去白边] sharp 裁剪完成: ${outputPath}`)
+            return true
+        } catch (err) {
+            console.error(`[去白边] sharp 裁剪失败: ${err.message}`)
+            return false
+        }
+    }
+
+    // 视频白边处理：先通过 negate 滤镜反转颜色，使白边变黑，再用 cropdetect 检测黑边
+    const detectCmd = [
+        'ffmpeg', '-y', '-i', inputPath,
+        '-vf', 'negate,cropdetect=16:8:0',
+        '-vframes', '20',
+        '-f', 'null', '-'
+    ]
+    console.log(`[去白边] 执行检测命令: ${detectCmd.join(' ')}`)
+    try {
+        const { stderr } = await execPromise(detectCmd.join(' '))
+        console.log(`[去白边] 检测输出(stderr):\n${stderr}`)
+        const matches = stderr.match(/crop=[0-9]+:[0-9]+:[0-9]+:[0-9]+/g)
+        if (!matches || matches.length === 0) {
+            console.log('[去白边] 未检测到白边')
+            return false
+        }
+        const cropFilter = matches[matches.length - 1]
+        console.log(`[去白边] 检测到白边对应的裁剪参数: ${cropFilter}`)
+
+        const cropCmd = [
+            'ffmpeg', '-y', '-i', inputPath,
+            '-vf', cropFilter,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+            '-c:a', 'copy', outputPath
+        ]
+        console.log(`[去白边] 执行裁剪命令: ${cropCmd.join(' ')}`)
+        const { stdout, stderr: cropStderr } = await execPromise(cropCmd.join(' '))
+        if (cropStderr) console.log(`[去白边] 裁剪输出:\n${cropStderr}`)
+        console.log(`[去白边] 裁剪完成，输出文件: ${outputPath}`)
+        return true
+    } catch (err) {
+        console.error(`[去白边] FFmpeg 裁剪失败: ${err.message}`)
+        if (err.stderr) console.error(`[去白边] stderr:\n${err.stderr}`)
+        if (err.stdout) console.error(`[去白边] stdout:\n${err.stdout}`)
+        return false
+    }
+}
+// =======================================
+
 async function delayedDelete(filePaths, delay) {
     await new Promise(resolve => setTimeout(resolve, delay * 1000))
     for (const filePath of filePaths) {
@@ -191,13 +246,17 @@ async function delayedDelete(filePaths, delay) {
 export class cropBlackBorder extends plugin {
     constructor() {
         super({
-            name: '去黑边',
+            name: '[ffmpeg-plugin]去黑边/去白边',
             event: 'message',
             priority: 1000,
             rule: [
                 {
                     reg: '^#?去黑边$',
                     fnc: 'crop'
+                },
+                {
+                    reg: '^#?去白边$',   // 新增去白边指令
+                    fnc: 'cropWhite'
                 }
             ]
         })
@@ -240,6 +299,7 @@ export class cropBlackBorder extends plugin {
         return []
     }
 
+    // 原有去黑边方法
     async crop(e) {
         let mediaList = []
 
@@ -262,14 +322,14 @@ export class cropBlackBorder extends plugin {
 
         const isBatch = mediaList.length > 1
         if (isBatch) {
-            await e.reply(`📦 发现 ${mediaList.length} 个媒体，开始批量处理，请耐心等待...`)
+            await e.reply(`📦 发现 ${mediaList.length} 个媒体，开始批量处理（去黑边），请耐心等待...`)
         } else {
-            await e.reply('✂️ 正在处理中，请稍候...')
+            await e.reply('✂️ 正在处理中（去黑边），请稍候...')
         }
 
         const tempFilesPool = []
-        const successItems = []    // 存储成功裁剪的文件 { path, type }
-        const failReasons = []     // 存储失败原因字符串
+        const successItems = []
+        const failReasons = []
 
         try {
             for (let idx = 0; idx < mediaList.length; idx++) {
@@ -314,13 +374,11 @@ export class cropBlackBorder extends plugin {
                 }
             }
 
-            // 汇总失败信息（如果有）
             if (failReasons.length > 0) {
                 const failMsg = `❌ 批量处理中发生以下错误：\n${failReasons.map((r, i) => `${i+1}. ${r}`).join('\n')}`
                 await e.reply(failMsg, true)
             }
 
-            // 根据成功数量决定发送方式
             if (successItems.length === 0) {
                 if (failReasons.length === 0) {
                     await e.reply('❌ 没有成功处理任何媒体，请检查输入。', true)
@@ -329,7 +387,6 @@ export class cropBlackBorder extends plugin {
             }
 
             if (successItems.length === 1) {
-                // 单个成功，直接发送媒体
                 const item = successItems[0]
                 if (item.type === 'image') {
                     await e.reply(segment.image(item.path))
@@ -337,20 +394,16 @@ export class cropBlackBorder extends plugin {
                     await e.reply(segment.video(item.path))
                 }
             } else {
-                // 多个成功 → 合并转发
-                await e.reply(`✅ 成功处理 ${successItems.length} 个媒体，正在打包合并转发...`, true)
+                await e.reply(`✅ 成功处理 ${successItems.length} 个媒体（去黑边），正在打包合并转发...`, true)
 
-                // 构造合并转发节点（修正消息段格式）
                 const forwardNodes = []
                 const botUin = e.bot.uin || e.bot.selfId || '10000'
                 const botName = '去黑边助手'
 
                 for (const item of successItems) {
-                    // 确保消息段符合 OneBot 标准：{ type, data: { file: ... } }
                     const msgSegment = {
                         type: item.type,
                         data: {
-                            // 使用 file:// 协议，提高兼容性
                             file: `file://${item.path}`
                         }
                     }
@@ -395,4 +448,155 @@ export class cropBlackBorder extends plugin {
             }
         }
     }
+
+    // ========== 新增：去白边方法 ==========
+    async cropWhite(e) {
+        let mediaList = []
+
+        const replyMedia = await this.getReplyMedia(e)
+        if (replyMedia.length > 0) {
+            mediaList = replyMedia
+        }
+
+        if (mediaList.length === 0 && e.message) {
+            mediaList = await this.extractMediaFromMsg(e.message, e.bot)
+        }
+
+        if (mediaList.length === 0) {
+            return e.reply('❌ 请回复或引用一条包含图片/视频的消息，或直接发送带有图片/视频的命令。', true)
+        }
+
+        if (mediaList.length > MAX_BATCH_COUNT) {
+            return e.reply(`❌ 媒体数量过多！一次最多处理 ${MAX_BATCH_COUNT} 个。`, true)
+        }
+
+        const isBatch = mediaList.length > 1
+        if (isBatch) {
+            await e.reply(`📦 发现 ${mediaList.length} 个媒体，开始批量处理（去白边），请耐心等待...`)
+        } else {
+            await e.reply('✂️ 正在处理中（去白边），请稍候...')
+        }
+
+        const tempFilesPool = []
+        const successItems = []
+        const failReasons = []
+
+        try {
+            for (let idx = 0; idx < mediaList.length; idx++) {
+                const media = mediaList[idx]
+                const mediaType = media.type
+                const url = media.url
+                if (!url) {
+                    failReasons.push(`第 ${idx+1} 个媒体：无法获取 URL`)
+                    continue
+                }
+
+                let inputPath = null
+                let outputPath = null
+                try {
+                    inputPath = await downloadMediaToTemp(url)
+                    tempFilesPool.push(inputPath)
+
+                    const isImage = mediaType === 'image' || /\.(jpg|jpeg|png|bmp|webp)$/i.test(path.extname(inputPath))
+                    const outExt = isImage ? '.jpg' : '.mp4'
+                    const baseName = path.basename(inputPath, path.extname(inputPath))
+                    outputPath = path.join(TEMP_DIR, `${baseName}_cropped_white${outExt}`)
+                    tempFilesPool.push(outputPath)
+
+                    console.log(`[去白边] 处理第 ${idx+1} 个媒体: ${mediaType}, 输入=${inputPath}, 输出=${outputPath}`)
+
+                    const success = await cropMediaWithFFmpegWhite(inputPath, outputPath, isImage ? 'image' : 'video')
+
+                    if (success && await fs.stat(outputPath).then(() => true).catch(() => false)) {
+                        console.log(`[去白边] 裁剪成功，加入成功列表`)
+                        successItems.push({ path: outputPath, type: isImage ? 'image' : 'video' })
+                    } else {
+                        console.log(`[去白边] 裁剪失败或输出文件不存在`)
+                        failReasons.push(`第 ${idx+1} 个${isImage ? '图片' : '视频'}处理失败：可能是格式不支持或未检测到白边。`)
+                    }
+                } catch (err) {
+                    console.error(`[去白边] 处理第 ${idx+1} 个媒体时异常:`, err)
+                    if (err.message && err.message.includes('maxContentLength')) {
+                        failReasons.push(`第 ${idx+1} 个媒体大于 ${MAX_SIZE_MB} MB，拒绝处理。`)
+                    } else {
+                        failReasons.push(`第 ${idx+1} 个媒体处理异常：${err.message}`)
+                    }
+                }
+            }
+
+            if (failReasons.length > 0) {
+                const failMsg = `❌ 批量处理中发生以下错误：\n${failReasons.map((r, i) => `${i+1}. ${r}`).join('\n')}`
+                await e.reply(failMsg, true)
+            }
+
+            if (successItems.length === 0) {
+                if (failReasons.length === 0) {
+                    await e.reply('❌ 没有成功处理任何媒体，请检查输入。', true)
+                }
+                return
+            }
+
+            if (successItems.length === 1) {
+                const item = successItems[0]
+                if (item.type === 'image') {
+                    await e.reply(segment.image(item.path))
+                } else {
+                    await e.reply(segment.video(item.path))
+                }
+            } else {
+                await e.reply(`✅ 成功处理 ${successItems.length} 个媒体（去白边），正在打包合并转发...`, true)
+
+                const forwardNodes = []
+                const botUin = e.bot.uin || e.bot.selfId || '10000'
+                const botName = '去白边助手'
+
+                for (const item of successItems) {
+                    const msgSegment = {
+                        type: item.type,
+                        data: {
+                            file: `file://${item.path}`
+                        }
+                    }
+                    const content = [msgSegment]
+                    forwardNodes.push({
+                        type: 'node',
+                        data: {
+                            name: botName,
+                            uin: String(botUin),
+                            content: content
+                        }
+                    })
+                }
+
+                try {
+                    if (e.isGroup) {
+                        await e.bot.sendApi('send_group_forward_msg', {
+                            group_id: e.group_id,
+                            messages: forwardNodes
+                        })
+                    } else {
+                        await e.bot.sendApi('send_private_forward_msg', {
+                            user_id: e.user_id,
+                            messages: forwardNodes
+                        })
+                    }
+                } catch (forwardErr) {
+                    console.error('[去白边] 合并转发发送失败，回退逐条发送:', forwardErr)
+                    await e.reply('⚠️ 合并转发发送失败，改为逐条发送。', true)
+                    for (const item of successItems) {
+                        if (item.type === 'image') {
+                            await e.reply(segment.image(item.path))
+                        } else {
+                            await e.reply(segment.video(item.path))
+                        }
+                    }
+                }
+            }
+        } finally {
+            if (tempFilesPool.length > 0) {
+                delayedDelete(tempFilesPool, DELAY_DELETE_SECONDS)
+            }
+        }
+    }
+    // =======================================
 }

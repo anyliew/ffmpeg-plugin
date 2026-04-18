@@ -492,7 +492,7 @@ async function htmlToImageFile(html) {
 export class ffmpegVersion extends plugin {
   constructor() {
     super({
-      name: 'FFmpeg版本查询',
+      name: '[ffmpeg-plugin]FFmpeg版本查询',
       event: 'message',
       priority: 1000,
       rule: [

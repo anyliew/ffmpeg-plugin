@@ -5,7 +5,7 @@ let updating = false
 export class ffmpegUpdate extends plugin {
   constructor() {
     super({
-      name: "FFmpeg插件更新",
+      name: "[ffmpeg-plugin]FFmpeg插件更新",
       dsc: "#ff更新 / #ffmpeg-plugin更新",
       event: "message",
       priority: -Infinity,

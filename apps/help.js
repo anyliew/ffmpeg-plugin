@@ -359,7 +359,7 @@ let generating = false
 export class ffmpegHelp extends plugin {
   constructor() {
     super({
-      name: 'FFmpeg插件帮助',
+      name: '[ffmpeg-plugin]FFmpeg插件帮助',
       dsc: '#ff帮助 / #ffmpeg-plugin帮助',
       event: 'message',
       priority: 100,
