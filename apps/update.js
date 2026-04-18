@@ -35,12 +35,18 @@ export class ffmpegUpdate extends plugin {
 
     updating = true
     const pluginPath = "plugins/ffmpeg-plugin"
+    const messages = []   // 收集所有待发送的消息
+
+    const pushMsg = (text) => {
+      messages.push(text)
+    }
 
     try {
       // 检查目录是否存在
       const exists = await fs.access(pluginPath).then(() => true).catch(() => false)
       if (!exists) {
-        await this.reply(`未找到插件目录：${pluginPath}`)
+        pushMsg(`未找到插件目录：${pluginPath}`)
+        await this.sendForwardOrPlain(messages)
         return false
       }
 
@@ -50,11 +56,12 @@ export class ffmpegUpdate extends plugin {
         : "git pull"
 
       logger.mark(`[FFmpeg] 开始${this.isForce ? "强制" : ""}更新`)
-      await this.reply(`开始${this.isForce ? "强制" : ""}更新 ffmpeg-plugin`)
+      pushMsg(`开始${this.isForce ? "强制" : ""}更新 ffmpeg-plugin`)
 
       const ret = await this.exec(cmd, pluginPath)
       if (ret.error) {
-        await this.handleGitError(ret, pluginPath)
+        await this.handleGitError(ret, pluginPath, pushMsg)
+        await this.sendForwardOrPlain(messages)
         return false
       }
 
@@ -62,23 +69,27 @@ export class ffmpegUpdate extends plugin {
       const isUpToDate = /Already up|已经是最新/.test(ret.stdout)
 
       if (isUpToDate) {
-        await this.reply(`ffmpeg-plugin 已是最新\n最后更新时间：${time}`)
+        pushMsg(`ffmpeg-plugin 已是最新\n最后更新时间：${time}`)
+        await this.sendForwardOrPlain(messages)
         return false
       }
 
       // 有更新
       const pkgChanged = /package\.json/.test(ret.stdout)
-      await this.reply(`ffmpeg-plugin 更新成功\n更新时间：${time}`)
-      await this.reply(await this.getLog(oldCommit, pluginPath))
+      pushMsg(`ffmpeg-plugin 更新成功\n更新时间：${time}`)
+      const logMsg = await this.getLog(oldCommit, pluginPath)
+      pushMsg(logMsg)
 
       if (pkgChanged) {
-        await this.updateDeps(pluginPath)
+        await this.updateDeps(pluginPath, pushMsg)
       }
 
-      await this.reply("更新完成（未自动重启，如需重启请手动操作）")
+      pushMsg("更新完成（未自动重启，如需重启请手动操作）")
+      await this.sendForwardOrPlain(messages)
     } catch (err) {
       logger.error(`[FFmpeg] 异常：${err}`)
-      await this.reply(`更新出错：${err.message}`)
+      pushMsg(`更新出错：${err.message}`)
+      await this.sendForwardOrPlain(messages)
     } finally {
       updating = false
     }
@@ -131,28 +142,28 @@ export class ffmpegUpdate extends plugin {
     return `${remote}/${branch}`
   }
 
-  // 错误处理
-  async handleGitError(ret, cwdPath) {
+  // 错误处理（使用 pushMsg 收集消息）
+  async handleGitError(ret, cwdPath, pushMsg) {
     const errMsg = ret.error?.message || ""
     const stdout = ret.stdout || ""
 
     if (/unable to access|无法访问/.test(errMsg)) {
       const url = errMsg.match(/'(.*?)'/)?.[1] || "未知地址"
-      await this.reply(`远程仓库连接错误：${url}`)
+      pushMsg(`远程仓库连接错误：${url}`)
     } else if (/not found|未找到|does not exist|不存在|Authentication failed/.test(errMsg)) {
       const url = errMsg.match(/'(.*?)'/)?.[1] || "未知地址"
-      await this.reply(`远程仓库地址错误：${url}`)
+      pushMsg(`远程仓库地址错误：${url}`)
     } else if (/be overwritten by merge|Merge conflict/.test(errMsg) || /合并冲突/.test(stdout)) {
-      await this.reply(`存在合并冲突，请手动解决或使用 #ff强制更新 覆盖本地修改`)
+      pushMsg(`存在合并冲突，请手动解决或使用 #ff强制更新 覆盖本地修改`)
     } else if (/divergent branches/.test(errMsg)) {
       const rebaseRet = await this.exec("git pull --rebase", cwdPath)
       if (!rebaseRet.error && /Successfully rebased|成功变基/.test(rebaseRet.stdout + rebaseRet.stderr)) {
-        await this.reply("已通过 rebase 解决分支偏离")
+        pushMsg("已通过 rebase 解决分支偏离")
         return
       }
-      await this.reply(`分支偏离，请手动处理或使用 #ff强制更新`)
+      pushMsg(`分支偏离，请手动处理或使用 #ff强制更新`)
     } else {
-      await this.reply(`更新失败：${errMsg}\n${stdout}`)
+      pushMsg(`更新失败：${errMsg}\n${stdout}`)
     }
   }
 
@@ -172,18 +183,51 @@ export class ffmpegUpdate extends plugin {
     return `更新日志（共${logs.length}条）：\n${logs.join("\n")}`
   }
 
-  // 更新依赖
-  async updateDeps(cwdPath) {
+  // 更新依赖（支持消息收集器）
+  async updateDeps(cwdPath, pushMsg) {
     if (process.platform === "win32") {
-      await this.reply("检测到 package.json 变更，请手动执行 pnpm install（或在 Windows 下使用 #关机 后手动安装）")
+      pushMsg("检测到 package.json 变更，请手动执行 pnpm install（或在 Windows 下使用 #关机 后手动安装）")
       return
     }
-    await this.reply("检测到依赖更新，正在执行 pnpm install ...")
+    pushMsg("检测到依赖更新，正在执行 pnpm install ...")
     const ret = await this.exec("pnpm install", cwdPath)
     if (ret.error) {
-      await this.reply(`依赖安装失败：${ret.error.message}`)
+      pushMsg(`依赖安装失败：${ret.error.message}`)
     } else {
-      await this.reply("依赖更新完成")
+      pushMsg("依赖更新完成")
     }
+  }
+
+  // 合并转发（群聊）或普通回复（私聊/失败时）
+  async sendForwardOrPlain(messages) {
+    if (!messages.length) return
+
+    const fullText = messages.join("\n\n")   // 合并转发的每一条消息之间用两个换行分隔
+
+    try {
+      // 如果是群聊且支持合并转发
+      if (this.e.group && typeof this.e.group.makeForwardMsg === "function") {
+        const botInfo = this.e.bot || {}
+        const botUserId = botInfo.uin || this.e.self_id || 10000
+        const botNickname = botInfo.nickname || "芙芙酱"
+
+        // 将每条消息拆分成独立的一条转发消息（保留原有分段感）
+        const forwardMsgs = messages.map(msg => ({
+          user_id: botUserId,
+          nickname: botNickname,
+          message: msg
+        }))
+
+        const forward = await this.e.group.makeForwardMsg(forwardMsgs)
+        await this.e.reply(forward)
+        return
+      }
+    } catch (err) {
+      logger.error("[FFmpeg] 合并转发失败，降级为普通回复", err)
+    }
+
+    // 降级：逐条发送或一次性发送（避免刷屏可选择一次性）
+    // 这里选择一次性发送（用分隔符）
+    await this.e.reply(fullText)
   }
 }
