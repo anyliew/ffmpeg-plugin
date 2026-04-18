@@ -478,10 +478,10 @@ async function htmlToImageFile(html) {
       headless: 'new'
     })
     const page = await browser.newPage()
-    await page.setViewport({ width: 1000, height: 600, deviceScaleFactor: 1.5 })
+    await page.setViewport({ width: 1000, height: 600, deviceScaleFactor: 2 })
     await page.setContent(html, { waitUntil: 'networkidle0' })
     const bodyHeight = await page.evaluate(() => document.body.scrollHeight)
-    await page.setViewport({ width: 1000, height: bodyHeight + 50, deviceScaleFactor: 1.5 })
+    await page.setViewport({ width: 1000, height: bodyHeight + 50, deviceScaleFactor: 2 })
     await page.screenshot({ path: tempFilePath, type: 'png', fullPage: true })
     return tempFilePath
   } finally {
