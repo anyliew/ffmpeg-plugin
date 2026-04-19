@@ -13,6 +13,9 @@ const MAX_SIZE_MB = 10
 const MAX_BATCH_COUNT = 10
 const DELAY_DELETE_SECONDS = 60
 
+// 颜色容差（欧几里得距离阈值），用于去纯色功能
+const COLOR_TRIM_THRESHOLD = 24
+
 async function ensureTempDir() {
     await fs.mkdir(TEMP_DIR, { recursive: true })
 }
@@ -61,7 +64,7 @@ async function downloadMediaToTemp(url, fallbackExt = null) {
         writer.on('finish', resolve)
         writer.on('error', reject)
     })
-    console.log(`[去黑边] 已下载临时文件: ${tempFile} (${(await fs.stat(tempFile)).size} bytes)`)
+    console.log(`[去纯色] 已下载临时文件: ${tempFile} (${(await fs.stat(tempFile)).size} bytes)`)
     return tempFile
 }
 
@@ -96,7 +99,7 @@ async function extractMediaRecursivelyAsync(message, bot) {
                                 }
                             }
                         } catch (err) {
-                            console.error('[去黑边] 获取合并转发内容失败:', err)
+                            console.error('[去纯色] 获取合并转发内容失败:', err)
                         }
                     }
                 } else if (Array.isArray(forwardContent)) {
@@ -121,12 +124,142 @@ async function extractMediaRecursivelyAsync(message, bot) {
     return mediaList
 }
 
+// ================= 去纯色核心函数 =================
+/**
+ * 根据图片左上角(0,0)像素颜色，裁剪掉边缘所有相似颜色区域
+ * @param {string} inputPath - 输入图片路径
+ * @param {string} outputPath - 输出图片路径
+ * @param {number} threshold - 颜色欧氏距离阈值（默认24）
+ * @returns {Promise<boolean>} 是否成功裁剪（无裁剪或出错返回false）
+ */
+async function trimByTopLeftColor(inputPath, outputPath, threshold = COLOR_TRIM_THRESHOLD) {
+    try {
+        const image = sharp(inputPath)
+        const metadata = await image.metadata()
+        const { width, height, channels } = metadata
+        if (!width || !height) return false
+
+        // 获取原始像素缓冲区
+        const { data } = await image
+            .raw()
+            .toBuffer({ resolveWithObject: true })
+
+        // 左上角像素颜色 (0,0)
+        const topLeftIdx = 0
+        const baseR = data[topLeftIdx]
+        const baseG = data[topLeftIdx + 1]
+        const baseB = data[topLeftIdx + 2]
+
+        // 颜色欧氏距离计算函数
+        const colorDist = (r, g, b) => {
+            const dr = r - baseR
+            const dg = g - baseG
+            const db = b - baseB
+            return Math.sqrt(dr * dr + dg * dg + db * db)
+        }
+
+        // 扫描上边界（从上往下，逐行）
+        let top = 0
+        for (let y = 0; y < height; y++) {
+            let rowAllBg = true
+            for (let x = 0; x < width; x++) {
+                const idx = (y * width + x) * channels
+                const dist = colorDist(data[idx], data[idx+1], data[idx+2])
+                if (dist > threshold) {
+                    rowAllBg = false
+                    break
+                }
+            }
+            if (!rowAllBg) {
+                top = y
+                break
+            }
+        }
+
+        // 扫描下边界（从下往上）
+        let bottom = height - 1
+        for (let y = height - 1; y >= 0; y--) {
+            let rowAllBg = true
+            for (let x = 0; x < width; x++) {
+                const idx = (y * width + x) * channels
+                const dist = colorDist(data[idx], data[idx+1], data[idx+2])
+                if (dist > threshold) {
+                    rowAllBg = false
+                    break
+                }
+            }
+            if (!rowAllBg) {
+                bottom = y
+                break
+            }
+        }
+
+        // 扫描左边界（从左往右）
+        let left = 0
+        for (let x = 0; x < width; x++) {
+            let colAllBg = true
+            for (let y = 0; y < height; y++) {
+                const idx = (y * width + x) * channels
+                const dist = colorDist(data[idx], data[idx+1], data[idx+2])
+                if (dist > threshold) {
+                    colAllBg = false
+                    break
+                }
+            }
+            if (!colAllBg) {
+                left = x
+                break
+            }
+        }
+
+        // 扫描右边界（从右往左）
+        let right = width - 1
+        for (let x = width - 1; x >= 0; x--) {
+            let colAllBg = true
+            for (let y = 0; y < height; y++) {
+                const idx = (y * width + x) * channels
+                const dist = colorDist(data[idx], data[idx+1], data[idx+2])
+                if (dist > threshold) {
+                    colAllBg = false
+                    break
+                }
+            }
+            if (!colAllBg) {
+                right = x
+                break
+            }
+        }
+
+        // 检查是否整个图片都是背景色
+        if (top >= bottom || left >= right) {
+            console.log('[去纯色] 整个图片都是纯色背景，无法裁剪')
+            return false
+        }
+
+        const cropWidth = right - left + 1
+        const cropHeight = bottom - top + 1
+        // 避免裁剪后尺寸为0
+        if (cropWidth <= 0 || cropHeight <= 0) return false
+
+        await sharp(inputPath)
+            .extract({ left, top, width: cropWidth, height: cropHeight })
+            .toFile(outputPath)
+
+        console.log(`[去纯色] 裁剪完成: left=${left}, top=${top}, width=${cropWidth}, height=${cropHeight}`)
+        return true
+    } catch (err) {
+        console.error(`[去纯色] 处理失败: ${err.message}`)
+        return false
+    }
+}
+// =============================================
+
 async function cropMediaWithFFmpeg(inputPath, outputPath, type) {
     if (type === 'image') {
         try {
             console.log(`[去黑边] 使用 sharp 处理图片: ${inputPath}`)
             await sharp(inputPath)
-                .trim({ threshold: 16 })
+                .trim({ threshold: 24 })
                 .toFile(outputPath)
             console.log(`[去黑边] sharp 裁剪完成: ${outputPath}`)
             return true
@@ -136,10 +269,10 @@ async function cropMediaWithFFmpeg(inputPath, outputPath, type) {
         }
     }
 
-    // 视频处理
+    // 视频处理 - 阈值 24
     const detectCmd = [
         'ffmpeg', '-y', '-i', inputPath,
-        '-vf', 'cropdetect=16:8:0',
+        '-vf', 'cropdetect=24:8:0',
         '-vframes', '20',
         '-f', 'null', '-'
     ]
@@ -174,13 +307,12 @@ async function cropMediaWithFFmpeg(inputPath, outputPath, type) {
     }
 }
 
-// ========== 新增：去白边处理函数 ==========
 async function cropMediaWithFFmpegWhite(inputPath, outputPath, type) {
     if (type === 'image') {
         try {
             console.log(`[去白边] 使用 sharp 处理图片: ${inputPath}`)
             await sharp(inputPath)
-                .trim({ threshold: 16 })   // 同样使用阈值16，去除边缘相近色（白边）
+                .trim({ threshold: 24 })
                 .toFile(outputPath)
             console.log(`[去白边] sharp 裁剪完成: ${outputPath}`)
             return true
@@ -190,10 +322,10 @@ async function cropMediaWithFFmpegWhite(inputPath, outputPath, type) {
         }
     }
 
-    // 视频白边处理：先通过 negate 滤镜反转颜色，使白边变黑，再用 cropdetect 检测黑边
+    // 视频白边处理
     const detectCmd = [
         'ffmpeg', '-y', '-i', inputPath,
-        '-vf', 'negate,cropdetect=16:8:0',
+        '-vf', 'negate,cropdetect=24:8:0',
         '-vframes', '20',
         '-f', 'null', '-'
     ]
@@ -227,7 +359,6 @@ async function cropMediaWithFFmpegWhite(inputPath, outputPath, type) {
         return false
     }
 }
-// =======================================
 
 async function delayedDelete(filePaths, delay) {
     await new Promise(resolve => setTimeout(resolve, delay * 1000))
@@ -235,10 +366,10 @@ async function delayedDelete(filePaths, delay) {
         try {
             if (await fs.stat(filePath).then(() => true).catch(() => false)) {
                 await fs.unlink(filePath)
-                console.log(`[去黑边] 已清理临时文件: ${filePath}`)
+                console.log(`[去纯色] 已清理临时文件: ${filePath}`)
             }
         } catch (err) {
-            console.error(`[去黑边] 清理失败 ${filePath}: ${err.message}`)
+            console.error(`[去纯色] 清理失败 ${filePath}: ${err.message}`)
         }
     }
 }
@@ -246,7 +377,7 @@ async function delayedDelete(filePaths, delay) {
 export class cropBlackBorder extends plugin {
     constructor() {
         super({
-            name: '[ffmpeg-plugin]去黑边/去白边',
+            name: '[ffmpeg-plugin]去黑边/去白边/去纯色',
             event: 'message',
             priority: 1000,
             rule: [
@@ -255,8 +386,12 @@ export class cropBlackBorder extends plugin {
                     fnc: 'crop'
                 },
                 {
-                    reg: '^#?去白边$',   // 新增去白边指令
+                    reg: '^#?去白边$',
                     fnc: 'cropWhite'
+                },
+                {
+                    reg: '^#?去纯色$',
+                    fnc: 'cropSolidColor'
                 }
             ]
         })
@@ -282,7 +417,7 @@ export class cropBlackBorder extends plugin {
                     return await this.extractMediaFromMsg(rawMsg.message, e.bot)
                 }
             } catch (err) {
-                console.error('[去黑边] 通过 replyId 获取消息失败:', err)
+                console.error('[去纯色] 通过 replyId 获取消息失败:', err)
             }
         }
         if (e.source && e.group) {
@@ -293,13 +428,13 @@ export class cropBlackBorder extends plugin {
                     return await this.extractMediaFromMsg(rawMsg.message, e.bot)
                 }
             } catch (err) {
-                console.error('[去黑边] 通过 source 获取消息失败:', err)
+                console.error('[去纯色] 通过 source 获取消息失败:', err)
             }
         }
         return []
     }
 
-    // 原有去黑边方法
+    // 去黑边
     async crop(e) {
         let mediaList = []
 
@@ -449,7 +584,7 @@ export class cropBlackBorder extends plugin {
         }
     }
 
-    // ========== 新增：去白边方法 ==========
+    // 去白边
     async cropWhite(e) {
         let mediaList = []
 
@@ -589,6 +724,152 @@ export class cropBlackBorder extends plugin {
                         } else {
                             await e.reply(segment.video(item.path))
                         }
+                    }
+                }
+            }
+        } finally {
+            if (tempFilesPool.length > 0) {
+                delayedDelete(tempFilesPool, DELAY_DELETE_SECONDS)
+            }
+        }
+    }
+
+    // ========== 新增：去纯色 ==========
+    async cropSolidColor(e) {
+        let mediaList = []
+
+        const replyMedia = await this.getReplyMedia(e)
+        if (replyMedia.length > 0) {
+            mediaList = replyMedia
+        }
+
+        if (mediaList.length === 0 && e.message) {
+            mediaList = await this.extractMediaFromMsg(e.message, e.bot)
+        }
+
+        if (mediaList.length === 0) {
+            return e.reply('❌ 请回复或引用一条包含图片/视频的消息，或直接发送带有图片/视频的命令。', true)
+        }
+
+        // 过滤出图片（视频暂不支持）
+        const imageOnly = mediaList.filter(m => m.type === 'image')
+        if (imageOnly.length === 0) {
+            return e.reply('❌ “去纯色”功能仅支持图片，不支持视频。', true)
+        }
+
+        if (imageOnly.length > MAX_BATCH_COUNT) {
+            return e.reply(`❌ 图片数量过多！一次最多处理 ${MAX_BATCH_COUNT} 个。`, true)
+        }
+
+        const isBatch = imageOnly.length > 1
+        if (isBatch) {
+            await e.reply(`📦 发现 ${imageOnly.length} 张图片，开始批量处理（去纯色），请耐心等待...`)
+        } else {
+            await e.reply('🎨 正在处理中（去纯色），请稍候...')
+        }
+
+        const tempFilesPool = []
+        const successItems = []
+        const failReasons = []
+
+        try {
+            for (let idx = 0; idx < imageOnly.length; idx++) {
+                const media = imageOnly[idx]
+                const url = media.url
+                if (!url) {
+                    failReasons.push(`第 ${idx+1} 张图片：无法获取 URL`)
+                    continue
+                }
+
+                let inputPath = null
+                let outputPath = null
+                try {
+                    inputPath = await downloadMediaToTemp(url)
+                    tempFilesPool.push(inputPath)
+
+                    const ext = path.extname(inputPath) || '.jpg'
+                    const baseName = path.basename(inputPath, ext)
+                    outputPath = path.join(TEMP_DIR, `${baseName}_solid_cropped${ext}`)
+                    tempFilesPool.push(outputPath)
+
+                    console.log(`[去纯色] 处理第 ${idx+1} 张图片: 输入=${inputPath}, 输出=${outputPath}`)
+
+                    const success = await trimByTopLeftColor(inputPath, outputPath, COLOR_TRIM_THRESHOLD)
+
+                    if (success && await fs.stat(outputPath).then(() => true).catch(() => false)) {
+                        console.log(`[去纯色] 裁剪成功，加入成功列表`)
+                        successItems.push({ path: outputPath, type: 'image' })
+                    } else {
+                        console.log(`[去纯色] 裁剪失败或输出文件不存在`)
+                        failReasons.push(`第 ${idx+1} 张图片处理失败：可能是整张纯色或未检测到可裁剪边缘。`)
+                    }
+                } catch (err) {
+                    console.error(`[去纯色] 处理第 ${idx+1} 张图片时异常:`, err)
+                    if (err.message && err.message.includes('maxContentLength')) {
+                        failReasons.push(`第 ${idx+1} 张图片大于 ${MAX_SIZE_MB} MB，拒绝处理。`)
+                    } else {
+                        failReasons.push(`第 ${idx+1} 张图片处理异常：${err.message}`)
+                    }
+                }
+            }
+
+            if (failReasons.length > 0) {
+                const failMsg = `❌ 批量处理中发生以下错误：\n${failReasons.map((r, i) => `${i+1}. ${r}`).join('\n')}`
+                await e.reply(failMsg, true)
+            }
+
+            if (successItems.length === 0) {
+                if (failReasons.length === 0) {
+                    await e.reply('❌ 没有成功处理任何图片，请检查输入。', true)
+                }
+                return
+            }
+
+            if (successItems.length === 1) {
+                const item = successItems[0]
+                await e.reply(segment.image(item.path))
+            } else {
+                await e.reply(`✅ 成功处理 ${successItems.length} 张图片（去纯色），正在打包合并转发...`, true)
+
+                const forwardNodes = []
+                const botUin = e.bot.uin || e.bot.selfId || '10000'
+                const botName = '去纯色助手'
+
+                for (const item of successItems) {
+                    const msgSegment = {
+                        type: 'image',
+                        data: {
+                            file: `file://${item.path}`
+                        }
+                    }
+                    const content = [msgSegment]
+                    forwardNodes.push({
+                        type: 'node',
+                        data: {
+                            name: botName,
+                            uin: String(botUin),
+                            content: content
+                        }
+                    })
+                }
+
+                try {
+                    if (e.isGroup) {
+                        await e.bot.sendApi('send_group_forward_msg', {
+                            group_id: e.group_id,
+                            messages: forwardNodes
+                        })
+                    } else {
+                        await e.bot.sendApi('send_private_forward_msg', {
+                            user_id: e.user_id,
+                            messages: forwardNodes
+                        })
+                    }
+                } catch (forwardErr) {
+                    console.error('[去纯色] 合并转发发送失败，回退逐条发送:', forwardErr)
+                    await e.reply('⚠️ 合并转发发送失败，改为逐条发送。', true)
+                    for (const item of successItems) {
+                        await e.reply(segment.image(item.path))
                     }
                 }
             }
