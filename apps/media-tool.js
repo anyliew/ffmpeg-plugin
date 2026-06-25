@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import axios from 'axios'
 import { exec } from 'child_process'
 import { promisify } from 'util'
@@ -8,6 +9,7 @@ import os from 'os'
 import archiver from 'archiver'
 
 const execPromise = promisify(exec)
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // ================= 公共辅助函数 =================
 
@@ -24,6 +26,75 @@ function getTempFilePath(extension) {
     const tempDir = ensureTempDir()
     const randomName = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}${extension}`
     return path.join(tempDir, randomName)
+}
+
+/**
+ * 生成带时间戳的输出文件名
+ * 格式：转MP3_20260625_23-15-28_731.mp3
+ */
+function generateTimestampFileName(targetFormat, originalFileName) {
+    const now = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    const pad3 = (n) => String(n).padStart(3, '0')
+
+    const datePart =
+        now.getFullYear() +
+        pad(now.getMonth() + 1) +
+        pad(now.getDate())
+    const timePart =
+        pad(now.getHours()) + '-' +
+        pad(now.getMinutes()) + '-' +
+        pad(now.getSeconds())
+    const msPart = pad3(now.getMilliseconds())
+
+    const formatMap = {
+        'mp3': '转MP3',
+        'flac': '转FLAC',
+        'wav': '转WAV',
+        'gif': '转动图',
+        'voice': '转语音',
+        'mp4': '转视频'   // 新增
+    }
+    const prefix = formatMap[targetFormat] || '转码'
+
+    return `${prefix}_${datePart}_${timePart}_${msPart}.${targetFormat}`
+}
+
+/**
+ * 从 resources/mp3 目录随机选择一个 mp3 文件
+ */
+function getRandomBgmPath() {
+    const bgmDir = path.join(__dirname, '..', 'resources', 'mp3')
+    if (!fs.existsSync(bgmDir)) {
+        fs.mkdirSync(bgmDir, { recursive: true })
+        logger.warn(`[多媒体插件] 背景音乐目录不存在，已创建: ${bgmDir}`)
+        return null
+    }
+    const files = fs.readdirSync(bgmDir).filter(f => f.endsWith('.mp3'))
+    if (files.length === 0) {
+        logger.warn(`[多媒体插件] 背景音乐目录无 mp3 文件: ${bgmDir}`)
+        return null
+    }
+    const randomFile = files[Math.floor(Math.random() * files.length)]
+    return path.join(bgmDir, randomFile)
+}
+
+/**
+ * 获取媒体时长（秒），使用 ffprobe
+ */
+async function getMediaDuration(filePath) {
+    try {
+        const { stdout } = await execPromise(
+            `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`
+        )
+        const duration = parseFloat(stdout.trim())
+        if (isNaN(duration) || duration <= 0) {
+            throw new Error('无法解析时长')
+        }
+        return duration
+    } catch (err) {
+        throw new Error(`获取时长失败: ${err.message}`)
+    }
 }
 
 async function downloadFile(url, destPath) {
@@ -133,7 +204,7 @@ export class mediaTool extends plugin {
     constructor() {
         super({
             name: '[ffmpeg-plugin]多媒体工具箱',
-            dsc: '视频转GIF、GIF分解、GIF打包ZIP、视频转语音、音视频转MP3/FLAC',
+            dsc: '视频转GIF、GIF分解、GIF打包ZIP、视频转语音、音视频转MP3/FLAC/WAV、GIF转MP4',
             event: 'message',
             priority: 310,
             rule: [
@@ -143,7 +214,9 @@ export class mediaTool extends plugin {
                 { reg: '^#?(动图打包|gif打包)$', fnc: 'packGifToZip' },
                 { reg: '^#转语音$', fnc: 'convertToVoice' },
                 { reg: '^#转mp3$', fnc: 'convertToMp3' },
-                { reg: '^#转flac$', fnc: 'convertToFlac' }
+                { reg: '^#转flac$', fnc: 'convertToFlac' },
+                { reg: '^#转wav$', fnc: 'convertToWav' },
+                { reg: '^#转视频$', fnc: 'convertGifToVideo' }   // 新增
             ]
         })
     }
@@ -179,13 +252,20 @@ export class mediaTool extends plugin {
         return videos
     }
 
+    // 扩展音频提取，支持 record/audio/file 类型
     extractAudioFromMsg(messageArray) {
         if (!Array.isArray(messageArray)) return []
         const audioSegments = []
-        const directAudios = messageArray.filter(seg => seg.type === 'audio')
+
+        // 直接音频段（包括语音消息 record 和普通 audio）
+        const directAudios = messageArray.filter(seg =>
+            seg.type === 'audio' || seg.type === 'record'
+        )
         audioSegments.push(...directAudios)
+
+        // file 段：检测扩展名是否为音频
         const files = messageArray.filter(seg => seg.type === 'file')
-        const audioExts = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus']
+        const audioExts = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.amr', '.silk']
         for (const file of files) {
             const data = file.data || {}
             let fileName = data.filename || data.file || ''
@@ -377,6 +457,7 @@ export class mediaTool extends plugin {
     }
 
     async getTargetMediaForTranscode(e) {
+        // 优先检测视频，其次音频（含语音）
         const video = await this.getTargetVideo(e)
         if (video) return { type: 'video', ...video }
         const audio = await this.getTargetAudio(e)
@@ -417,6 +498,27 @@ export class mediaTool extends plugin {
         const cmd = `ffmpeg -i "${inputPath}" -c:a flac "${outputPath}" -y`
         await this.runFFmpeg(cmd, 120000)
         return outputPath
+    }
+
+    async convertToWavFile(inputPath, outputPath) {
+        const cmd = `ffmpeg -i "${inputPath}" -c:a pcm_s16le "${outputPath}" -y`
+        await this.runFFmpeg(cmd, 120000)
+        return outputPath
+    }
+
+    /**
+     * GIF 转 MP4，并添加随机背景音乐
+     */
+    async convertGifToMp4(inputGifPath, outputMp4Path, bgmPath) {
+        // 1. 获取 GIF 时长
+        const duration = await getMediaDuration(inputGifPath)
+        logger.info(`[转视频] GIF 时长: ${duration} 秒`)
+
+        // 2. 构建 ffmpeg 命令
+        // 使用 -t duration 截断音频， -shortest 也可，但 -t 更精确
+        const cmd = `ffmpeg -i "${inputGifPath}" -i "${bgmPath}" -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -c:a aac -t ${duration} -movflags +faststart "${outputMp4Path}" -y`
+        await this.runFFmpeg(cmd, 180000)
+        return outputMp4Path
     }
 
     async sendFileAsMessage(e, filePath, displayName) {
@@ -694,31 +796,48 @@ export class mediaTool extends plugin {
         return true
     }
 
-    async convertToMp3(e) {
+    // ================= 转码核心方法（使用时间戳命名） =================
+
+    /**
+     * 通用转码方法：下载 -> 转码 -> 发送文件（使用时间戳命名）
+     * @param {Object} e - 事件对象
+     * @param {string} targetFormat - 目标格式 'mp3' | 'flac' | 'wav'
+     * @param {Function} convertFn - 转码函数 async (inputPath, outputPath) => Promise<void>
+     * @param {string} actionName - 显示用名称，如 'MP3'
+     */
+    async _transcodeAndSend(e, targetFormat, convertFn, actionName) {
         let inputTempPath = null, outputTempPath = null
         try {
-            await e.reply('⏳ 正在将音视频转为 MP3 文件，请稍等...')
+            await e.reply(`⏳ 正在将音视频转为 ${actionName} 文件，请稍等...`)
+
             const media = await this.getTargetMediaForTranscode(e)
             if (!media) {
-                await this.sendErrorAsForward(e, '请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转mp3')
+                await this.sendErrorAsForward(e,
+                    `请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a, amr, silk 等），然后发送 #转${targetFormat}`
+                )
                 return true
             }
-            logger.info(`[转MP3] 开始处理: ${media.fileName}`)
+
+            logger.info(`[转${actionName}] 开始处理: ${media.fileName}`)
             inputTempPath = getTempFilePath(path.extname(media.fileName) || '.bin')
             await downloadFile(media.fileUrl, inputTempPath)
             const stat = await fs.promises.stat(inputTempPath)
-            logger.info(`[转MP3] 下载完成，大小: ${formatSizeMB(stat.size)}`)
-            outputTempPath = getTempFilePath('.mp3')
-            await this.convertToMp3File(inputTempPath, outputTempPath)
+            logger.info(`[转${actionName}] 下载完成，大小: ${formatSizeMB(stat.size)}`)
+
+            // 使用时间戳命名
+            const outputFileName = generateTimestampFileName(targetFormat, media.fileName)
+            outputTempPath = path.join(ensureTempDir(), outputFileName)
+
+            await convertFn(inputTempPath, outputTempPath)
             const outStat = await fs.promises.stat(outputTempPath)
-            logger.info(`[转MP3] MP3 生成完成，大小: ${formatSizeMB(outStat.size)}`)
-            const outputFileName = path.basename(media.fileName, path.extname(media.fileName)) + '.mp3'
+            logger.info(`[转${actionName}] ${actionName} 生成完成，大小: ${formatSizeMB(outStat.size)}`)
+
             await this.sendFileAsMessage(e, outputTempPath, outputFileName)
-            logger.info(`[转MP3] 文件发送成功`)
+            logger.info(`[转${actionName}] 文件发送成功`)
             // 不发送完成提示消息
         } catch (err) {
-            logger.error(`[转MP3] 失败: ${err.message}`)
-            await this.sendErrorAsForward(e, `转 MP3 失败: ${err.message}`)
+            logger.error(`[转${actionName}] 失败: ${err.message}`)
+            await this.sendErrorAsForward(e, `转 ${actionName} 失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)
@@ -726,31 +845,62 @@ export class mediaTool extends plugin {
         return true
     }
 
+    async convertToMp3(e) {
+        return await this._transcodeAndSend(e, 'mp3', this.convertToMp3File.bind(this), 'MP3')
+    }
+
     async convertToFlac(e) {
+        return await this._transcodeAndSend(e, 'flac', this.convertToFlacFile.bind(this), 'FLAC')
+    }
+
+    async convertToWav(e) {
+        return await this._transcodeAndSend(e, 'wav', this.convertToWavFile.bind(this), 'WAV')
+    }
+
+    // ================= 新增：GIF 转 MP4 =================
+
+    async convertGifToVideo(e) {
         let inputTempPath = null, outputTempPath = null
         try {
-            await e.reply('⏳ 正在将音视频转为 FLAC 文件，请稍等...')
-            const media = await this.getTargetMediaForTranscode(e)
-            if (!media) {
-                await this.sendErrorAsForward(e, '请回复或发送一个视频/音频文件（支持 mp4, mkv, avi, mov, mp3, flac, wav, m4a 等），然后发送 #转flac')
+            await e.reply('⏳ 正在将 GIF 转为视频并添加背景音乐，请稍等...')
+
+            // 1. 获取目标 GIF
+            const targetImage = await this.getTargetImage(e)
+            if (!targetImage) {
+                await this.sendErrorAsForward(e, '请回复或引用一条包含 GIF 图片的消息，或直接发送带有 GIF 的命令。')
                 return true
             }
-            logger.info(`[转FLAC] 开始处理: ${media.fileName}`)
-            inputTempPath = getTempFilePath(path.extname(media.fileName) || '.bin')
-            await downloadFile(media.fileUrl, inputTempPath)
-            const stat = await fs.promises.stat(inputTempPath)
-            logger.info(`[转FLAC] 下载完成，大小: ${formatSizeMB(stat.size)}`)
-            outputTempPath = getTempFilePath('.flac')
-            await this.convertToFlacFile(inputTempPath, outputTempPath)
+
+            // 2. 下载 GIF
+            inputTempPath = await downloadImageToTemp(targetImage.url)
+            const format = await getImageFormatByFfprobe(inputTempPath)
+            if (format !== 'GIF') {
+                await this.sendErrorAsForward(e, `该图片格式为 ${format}，仅支持 GIF 动图转视频。`)
+                return true
+            }
+
+            // 3. 随机选择背景音乐
+            const bgmPath = getRandomBgmPath()
+            if (!bgmPath) {
+                await this.sendErrorAsForward(e, '未找到背景音乐文件，请在 resources/mp3 目录下放置至少一个 .mp3 文件。')
+                return true
+            }
+            logger.info(`[转视频] 使用背景音乐: ${bgmPath}`)
+
+            // 4. 转码
+            const outputFileName = generateTimestampFileName('mp4', 'gif')
+            outputTempPath = path.join(ensureTempDir(), outputFileName)
+            await this.convertGifToMp4(inputTempPath, outputTempPath, bgmPath)
+
+            // 5. 发送视频消息
             const outStat = await fs.promises.stat(outputTempPath)
-            logger.info(`[转FLAC] FLAC 生成完成，大小: ${formatSizeMB(outStat.size)}`)
-            const outputFileName = path.basename(media.fileName, path.extname(media.fileName)) + '.flac'
-            await this.sendFileAsMessage(e, outputTempPath, outputFileName)
-            logger.info(`[转FLAC] 文件发送成功`)
-            // 不发送完成提示消息
+            logger.info(`[转视频] MP4 生成完成，大小: ${formatSizeMB(outStat.size)}`)
+            await e.reply(segment.video(outputTempPath))
+            logger.info(`[转视频] 视频发送成功`)
+
         } catch (err) {
-            logger.error(`[转FLAC] 失败: ${err.message}`)
-            await this.sendErrorAsForward(e, `转 FLAC 失败: ${err.message}`)
+            logger.error(`[转视频] 失败: ${err.message}`)
+            await this.sendErrorAsForward(e, `转视频失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)

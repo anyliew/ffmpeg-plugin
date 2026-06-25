@@ -2,9 +2,11 @@ import { exec } from 'child_process'
 import { promisify } from 'util'
 import { promises as fs } from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import puppeteer from 'puppeteer'
 
 const execPromise = promisify(exec)
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // 导入 segment（Yunzai 框架常用）
 let segment
@@ -24,6 +26,36 @@ async function ensureTempDir() {
 }
 
 /**
+ * 加载 SVG 图标并转为 data URI（相对路径）
+ */
+async function loadIconDataUri(filename) {
+  const filePath = path.join(__dirname, '..', 'resources', 'icon', filename)
+  try {
+    const content = await fs.readFile(filePath)
+    return `data:image/svg+xml;base64,${content.toString('base64')}`
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 加载所有需要的图标
+ */
+async function loadAllIcons() {
+  const [ffmpeg, update, rely, video, music, hardware, packaged, config] = await Promise.all([
+    loadIconDataUri('ffmpeg.svg'),
+    loadIconDataUri('update.svg'),
+    loadIconDataUri('rely.svg'),
+    loadIconDataUri('video.svg'),
+    loadIconDataUri('music.svg'),
+    loadIconDataUri('hardware.svg'),
+    loadIconDataUri('packaged.svg'),
+    loadIconDataUri('config.svg')
+  ])
+  return { ffmpeg, update, rely, video, music, hardware, packaged, config }
+}
+
+/**
  * 获取 ffmpeg 版本信息
  */
 async function getFfmpegVersionInfo() {
@@ -36,7 +68,7 @@ async function getFfmpegVersionInfo() {
 }
 
 /**
- * 提取版本号（支持官方稳定版和 BtbN 自动构建版）
+ * 提取版本号（支持官方稳定版和各类 git 构建版）
  */
 function extractVersionNumber(versionOutput) {
   const match = versionOutput.match(/ffmpeg version\s+(\S+)/i)
@@ -44,17 +76,29 @@ function extractVersionNumber(versionOutput) {
 }
 
 /**
- * 从版本信息中提取基础版本描述
+ * 从版本信息中提取基础版本描述（适配 gyan.dev / BtbN 等常见构建）
  */
 function getBaseVersionDescription(versionOutput, versionNumber) {
+  // 检测构建来源（gyan.dev 或 BtbN）
+  if (versionOutput.includes('gyan.dev')) {
+    return `基于 FFmpeg git 开发版 (gyan.dev 自动构建)`
+  }
+  if (versionOutput.includes('BtbN')) {
+    return `基于 FFmpeg git 开发版 (BtbN 自动构建)`
+  }
+
+  // 尝试匹配稳定版本号（如 6.0, 7.0 等）
   const stableMatch = versionOutput.match(/ffmpeg version\s+(\d+\.\d+)/i)
   if (stableMatch) {
     const baseVer = stableMatch[1]
     return `基于 FFmpeg ${baseVer} 构建`
   }
+
+  // 其他情况：可能是其他开发版（包含 N-、git 等标识）
   if (versionNumber.startsWith('N-') || versionNumber.includes('g') || versionNumber.includes('-')) {
-    return `基于 FFmpeg git 开发版 (BtbN 自动构建)`
+    return `基于 FFmpeg git 开发版`
   }
+
   return `基于 FFmpeg 自定义构建`
 }
 
@@ -78,7 +122,6 @@ function getEnabledFeatures(versionOutput) {
 async function getGitLogDetailed(pluginDir) {
   try {
     await execPromise('git rev-parse --is-inside-work-tree', { cwd: pluginDir })
-    // 修改点：将 --date=short 替换为 --date=format-local:'%Y-%m-%d %H:%M:%S' 以显示时分秒
     const { stdout } = await execPromise(
       'git log -n 5 --pretty=format:"%h|%s|%an|%ad" --date=format-local:\'%Y-%m-%d %H:%M:%S\'',
       { cwd: pluginDir }
@@ -96,9 +139,9 @@ async function getGitLogDetailed(pluginDir) {
 }
 
 /**
- * 生成 HTML（优化字体大小 + PNG 适配）
+ * 生成 HTML（使用 SVG 图标替换 Emoji）
  */
-function buildHtml(versionRaw, versionNumber, commits) {
+function buildHtml(versionRaw, versionNumber, commits, icons) {
   const escapeHtml = (str) => {
     if (!str) return ''
     return str.replace(/[&<>]/g, (m) => {
@@ -130,6 +173,20 @@ function buildHtml(versionRaw, versionNumber, commits) {
 
   const now = new Date()
   const formattedTime = `${now.getFullYear()}/${now.getMonth()+1}/${now.getDate()} ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`
+
+  // 图标样式
+  const mainIconStyle = 'height:28px; width:28px; vertical-align:middle; margin-right:8px;'
+  const headerIconStyle = 'height:24px; width:24px; vertical-align:middle; margin-right:6px;'
+  const subIconStyle = 'height:20px; width:20px; vertical-align:middle; margin-right:6px;'
+
+  const ffmpegIcon = icons.ffmpeg ? `<img src="${icons.ffmpeg}" style="${mainIconStyle}">` : ''
+  const updateIcon = icons.update ? `<img src="${icons.update}" style="${headerIconStyle}">` : ''
+  const relyIcon = icons.rely ? `<img src="${icons.rely}" style="${headerIconStyle}">` : ''
+  const videoIcon = icons.video ? `<img src="${icons.video}" style="${subIconStyle}">` : ''
+  const musicIcon = icons.music ? `<img src="${icons.music}" style="${subIconStyle}">` : ''
+  const hardwareIcon = icons.hardware ? `<img src="${icons.hardware}" style="${subIconStyle}">` : ''
+  const packagedIcon = icons.packaged ? `<img src="${icons.packaged}" style="${subIconStyle}">` : ''
+  const configIcon = icons.config ? `<img src="${icons.config}" style="${headerIconStyle}">` : ''
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -177,10 +234,6 @@ function buildHtml(versionRaw, versionNumber, commits) {
             gap: 0.6rem;
         }
 
-        .page-header h1 span {
-            font-size: 2.2rem;
-        }
-
         .sub {
             color: #2c5a74;
             margin-top: 0.6rem;
@@ -206,14 +259,13 @@ function buildHtml(versionRaw, versionNumber, commits) {
             margin-bottom: 1.5rem;
         }
 
-        .card-header .icon {
-            font-size: 2rem;
-        }
-
         .card-header h2 {
             font-size: 1.8rem;
             font-weight: 600;
             color: #0f4c5f;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
 
         .version-info {
@@ -322,6 +374,9 @@ function buildHtml(versionRaw, versionNumber, commits) {
             font-weight: 700;
             margin-bottom: 0.8rem;
             color: #1c5a78;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
         }
 
         .codec-list {
@@ -370,15 +425,14 @@ function buildHtml(versionRaw, versionNumber, commits) {
 <body>
 <div class="container">
     <div class="page-header">
-        <h1><span>🎬</span> ffmpeg-plugin</h1>
+        <h1>${ffmpegIcon} ffmpeg-plugin</h1>
         <div class="sub">基于 FFmpeg 的 Yunzai-Bot 插件，提供图像、音视频处理及信息查询功能</div>
     </div>
 
-    <!-- 顺序1: FFmpeg版本（仅版本信息） -->
+    <!-- 顺序1: FFmpeg版本 -->
     <div class="card">
         <div class="card-header">
-            <div class="icon">📦</div>
-            <h2>FFmpeg 版本</h2>
+            <h2>${ffmpegIcon} FFmpeg 版本</h2>
         </div>
         <div class="version-info">
             <div class="version-tag">ffmpeg version ${escapeHtml(versionNumber)}</div>
@@ -386,26 +440,24 @@ function buildHtml(versionRaw, versionNumber, commits) {
         </div>
     </div>
 
-    <!-- 顺序2: 插件更新记录 (最近5条，含完整日期时间) -->
+    <!-- 顺序2: 插件更新记录 -->
     <div class="card">
         <div class="card-header">
-            <div class="icon">📝</div>
-            <h2>ffmpeg-plugin 插件更新记录</h2>
+            <h2>${updateIcon} ffmpeg-plugin 插件更新记录</h2>
         </div>
         <ul class="commit-list">
             ${commitsHtml || '<li style="padding:1rem;">暂无提交记录</li>'}
         </ul>
     </div>
 
-    <!-- 顺序3: ffmpeg 编解码库 (静态展示) -->
+    <!-- 顺序3: ffmpeg 编解码库 -->
     <div class="card">
         <div class="card-header">
-            <div class="icon">⚙️</div>
-            <h2>ffmpeg 编解码库</h2>
+            <h2>${relyIcon} ffmpeg 编解码库</h2>
         </div>
         <div class="codec-grid">
             <div class="codec-category">
-                <h3>🎞️ 视频编码器</h3>
+                <h3>${videoIcon} 视频编码器</h3>
                 <div class="codec-list">
                     <span class="codec-badge">H.264 / AVC</span>
                     <span class="codec-badge">H.265 / HEVC</span>
@@ -415,7 +467,7 @@ function buildHtml(versionRaw, versionNumber, commits) {
                 </div>
             </div>
             <div class="codec-category">
-                <h3>🎵 音频编码器</h3>
+                <h3>${musicIcon} 音频编码器</h3>
                 <div class="codec-list">
                     <span class="codec-badge">AAC</span>
                     <span class="codec-badge">MP3 (LAME)</span>
@@ -425,7 +477,7 @@ function buildHtml(versionRaw, versionNumber, commits) {
                 </div>
             </div>
             <div class="codec-category">
-                <h3>🔓 硬件加速</h3>
+                <h3>${hardwareIcon} 硬件加速</h3>
                 <div class="codec-list">
                     <span class="codec-badge">VAAPI</span>
                     <span class="codec-badge">NVENC</span>
@@ -434,7 +486,7 @@ function buildHtml(versionRaw, versionNumber, commits) {
                 </div>
             </div>
             <div class="codec-category">
-                <h3>📦 封装格式</h3>
+                <h3>${packagedIcon} 封装格式</h3>
                 <div class="codec-list">
                     <span class="codec-badge">MP4 / MOV</span>
                     <span class="codec-badge">MKV</span>
@@ -445,11 +497,10 @@ function buildHtml(versionRaw, versionNumber, commits) {
         </div>
     </div>
 
-    <!-- 顺序4: 详细编译配置（只显示 --enable- 特性） -->
+    <!-- 顺序4: 详细编译配置 -->
     <div class="card">
         <div class="card-header">
-            <div class="icon">🔧</div>
-            <h2>详细编译配置</h2>
+            <h2>${configIcon} 详细编译配置</h2>
         </div>
         <div class="config-list">
             ${featuresHtml || '<span class="config-chip">无 --enable- 项</span>'}
@@ -497,7 +548,7 @@ export class ffmpegVersion extends plugin {
       priority: 1000,
       rule: [
         {
-          reg: /^#(ffmpeg版本|ff版本)$/i,  // 支持 #ffmpeg版本 和 #ff版本，不区分大小写
+          reg: /^#(ffmpeg版本|ff版本)$/i,
           fnc: 'getFfmpegInfo'
         }
       ]
@@ -520,7 +571,10 @@ export class ffmpegVersion extends plugin {
         commits = []
       }
 
-      const html = buildHtml(versionRaw, versionNumber, commits)
+      // 加载所有图标
+      const icons = await loadAllIcons()
+
+      const html = buildHtml(versionRaw, versionNumber, commits, icons)
       const imagePath = await htmlToImageFile(html)
 
       await e.reply(segment.image(imagePath))
