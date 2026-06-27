@@ -53,7 +53,7 @@ function generateTimestampFileName(targetFormat, originalFileName) {
         'wav': '转WAV',
         'gif': '转动图',
         'voice': '转语音',
-        'mp4': '转视频'   // 新增
+        'mp4': '转视频'
     }
     const prefix = formatMap[targetFormat] || '转码'
 
@@ -216,7 +216,7 @@ export class mediaTool extends plugin {
                 { reg: '^#转mp3$', fnc: 'convertToMp3' },
                 { reg: '^#转flac$', fnc: 'convertToFlac' },
                 { reg: '^#转wav$', fnc: 'convertToWav' },
-                { reg: '^#转视频$', fnc: 'convertGifToVideo' }   // 新增
+                { reg: '^#转视频$', fnc: 'convertGifToVideo' }
             ]
         })
     }
@@ -508,15 +508,24 @@ export class mediaTool extends plugin {
 
     /**
      * GIF 转 MP4，并添加随机背景音乐
+     * 优化：宽高强制偶数，时长最少15秒（短GIF循环）
      */
     async convertGifToMp4(inputGifPath, outputMp4Path, bgmPath) {
-        // 1. 获取 GIF 时长
+        // 1. 获取 GIF 原始时长
         const duration = await getMediaDuration(inputGifPath)
-        logger.info(`[转视频] GIF 时长: ${duration} 秒`)
+        logger.info(`[转视频] GIF 原始时长: ${duration} 秒`)
 
-        // 2. 构建 ffmpeg 命令
-        // 使用 -t duration 截断音频， -shortest 也可，但 -t 更精确
-        const cmd = `ffmpeg -i "${inputGifPath}" -i "${bgmPath}" -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -c:a aac -t ${duration} -movflags +faststart "${outputMp4Path}" -y`
+        // 2. 目标时长：至少 15 秒
+        const targetDuration = Math.max(duration, 15)
+        logger.info(`[转视频] 目标视频时长: ${targetDuration} 秒`)
+
+        // 3. 如果 duration < 15，需要循环播放 GIF 和背景音乐
+        const loopFlag = duration < 15 ? '-stream_loop -1' : ''
+
+        // 4. 构建 ffmpeg 命令
+        //    - 使用 scale 滤镜确保宽高为偶数
+        //    - 循环播放（如果需要）并截断到目标时长
+        const cmd = `ffmpeg ${loopFlag} -i "${inputGifPath}" ${loopFlag} -i "${bgmPath}" -map 0:v -map 1:a -c:v libx264 -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -pix_fmt yuv420p -c:a aac -t ${targetDuration} -movflags +faststart "${outputMp4Path}" -y`
         await this.runFFmpeg(cmd, 180000)
         return outputMp4Path
     }
@@ -857,7 +866,7 @@ export class mediaTool extends plugin {
         return await this._transcodeAndSend(e, 'wav', this.convertToWavFile.bind(this), 'WAV')
     }
 
-    // ================= 新增：GIF 转 MP4 =================
+    // ================= GIF 转 MP4 =================
 
     async convertGifToVideo(e) {
         let inputTempPath = null, outputTempPath = null
@@ -887,7 +896,7 @@ export class mediaTool extends plugin {
             }
             logger.info(`[转视频] 使用背景音乐: ${bgmPath}`)
 
-            // 4. 转码
+            // 4. 转码（已包含宽高偶数 + 时长最少15秒循环）
             const outputFileName = generateTimestampFileName('mp4', 'gif')
             outputTempPath = path.join(ensureTempDir(), outputFileName)
             await this.convertGifToMp4(inputTempPath, outputTempPath, bgmPath)
