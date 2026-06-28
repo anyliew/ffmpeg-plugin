@@ -153,10 +153,30 @@ async function getAudioInfoByFfprobe(filePath) {
     }
 }
 
+/**
+ * 通过 ffprobe 获取帧数（单独命令，更可靠）
+ */
+async function getFrameCountViaFfprobe(filePath) {
+    try {
+        // 使用 -count_packets 强制统计，提取 nb_read_packets（通常等于帧数）
+        const { stdout } = await execPromise(
+            `ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of default=noprint_wrappers=1:nokey=1 "${filePath}"`
+        )
+        const trimmed = stdout.trim()
+        if (trimmed && !isNaN(parseInt(trimmed))) {
+            return parseInt(trimmed)
+        }
+        return null
+    } catch (err) {
+        return null
+    }
+}
+
 async function getImageInfoByFfprobe(filePath) {
     try {
+        // 使用 -count_frames 鼓励 ffprobe 统计帧数
         const { stdout } = await execPromise(
-            `ffprobe -v quiet -print_format json -show_streams -show_format "${filePath}"`
+            `ffprobe -v quiet -count_frames -print_format json -show_streams -show_format "${filePath}"`
         )
         const data = JSON.parse(stdout)
         const videoStream = data.streams?.find(s => s.codec_type === 'video')
@@ -167,29 +187,75 @@ async function getImageInfoByFfprobe(filePath) {
         else if (format === 'PNG') format = 'PNG'
         else if (format === 'GIF') format = 'GIF'
         else if (format === 'WEBP') format = 'WEBP'
-        else if (format === 'APNG') format = 'APNG'   // 新增 APNG 识别
+        else if (format === 'APNG') format = 'APNG'
 
         const width = videoStream.width || 0
         const height = videoStream.height || 0
 
-        let frames = null, fps = null
-        // 对 GIF 和 APNG 都提取帧数和帧率
+        let frames = null
+        let fps = null
+
+        // 获取帧率
+        const frameRateStr = videoStream.r_frame_rate || videoStream.avg_frame_rate
+        if (frameRateStr) {
+            const [num, den] = frameRateStr.split('/')
+            if (num && den && parseInt(den) !== 0) {
+                fps = parseFloat(num) / parseFloat(den)
+            } else if (num && !den) {
+                fps = parseFloat(num)
+            }
+        }
+
+        // 对 GIF 和 APNG 提取帧数
         if (format === 'GIF' || format === 'APNG') {
+            // 方案1：从 nb_frames 读取
             frames = videoStream.nb_frames
-            if (!frames && videoStream.avg_frame_rate) {
-                const [num, den] = videoStream.avg_frame_rate.split('/')
-                const duration = parseFloat(videoStream.duration)
-                if (!isNaN(duration) && num && den) {
-                    frames = Math.round(duration * (parseInt(num) / parseInt(den)))
+            if (frames !== undefined && frames !== null && frames !== 'N/A') {
+                frames = parseInt(frames)
+                if (isNaN(frames)) frames = null
+            } else {
+                frames = null
+            }
+
+            // 方案2：如果 nb_frames 无效，使用专用命令获取
+            if (!frames) {
+                const counted = await getFrameCountViaFfprobe(filePath)
+                if (counted !== null && counted > 0) {
+                    frames = counted
                 }
             }
-            const frameRateStr = videoStream.r_frame_rate || videoStream.avg_frame_rate
-            if (frameRateStr) {
-                const [num, den] = frameRateStr.split('/')
-                if (num && den && parseInt(den) !== 0) {
-                    fps = parseFloat(num) / parseFloat(den)
-                } else if (num && !den) {
-                    fps = parseFloat(num)
+
+            // 方案3：通过 duration × avg_frame_rate 计算
+            if (!frames) {
+                const duration = parseFloat(videoStream.duration || data.format?.duration)
+                if (!isNaN(duration) && duration > 0) {
+                    let avgFps = null
+                    const avgRateStr = videoStream.avg_frame_rate
+                    if (avgRateStr) {
+                        const [num, den] = avgRateStr.split('/')
+                        if (num && den && parseInt(den) !== 0) {
+                            avgFps = parseFloat(num) / parseFloat(den)
+                        } else if (num && !den) {
+                            avgFps = parseFloat(num)
+                        }
+                    }
+                    if (!avgFps || avgFps <= 0) {
+                        avgFps = fps
+                    }
+                    if (avgFps && avgFps > 0) {
+                        frames = Math.round(duration * avgFps)
+                    }
+                }
+            }
+
+            // 方案4：尝试从 tags 中读取 NUMBER_OF_FRAMES
+            if (!frames && videoStream.tags) {
+                const tagFrames = videoStream.tags.NUMBER_OF_FRAMES || videoStream.tags['NUMBER_OF_FRAMES']
+                if (tagFrames) {
+                    const parsed = parseInt(tagFrames)
+                    if (!isNaN(parsed) && parsed > 0) {
+                        frames = parsed
+                    }
                 }
             }
         }
@@ -342,18 +408,15 @@ export class mediaInfo extends plugin {
         }
     }
 
-    // ========== 核心新增：获取媒体真实下载链接 ==========
+    // ========== 核心：获取媒体真实下载链接 ==========
     async _getMediaUrl(segment, e) {
         const data = segment.data || {}
-        // 如果已有 url 且非空，直接返回
         if (data.url && typeof data.url === 'string' && data.url.trim() !== '') {
             return data.url
         }
 
-        // 群文件：通过 file_id 获取下载链接
         if (e.group && data.file_id) {
             try {
-                // 尝试调用 get_group_file_url API (OneBot v11 标准)
                 const result = await e.bot.sendApi('get_group_file_url', {
                     group_id: e.group.group_id,
                     file_id: data.file_id
@@ -366,7 +429,6 @@ export class mediaInfo extends plugin {
                 logger.warn(`get_group_file_url 失败: ${err.message}`)
             }
 
-            // 备用：尝试构造 go-cqhttp 特定 API
             try {
                 const result = await e.bot.sendApi('get_group_file_url', {
                     group_id: e.group.group_id,
@@ -377,7 +439,6 @@ export class mediaInfo extends plugin {
             } catch (err) {}
         }
 
-        // 私聊文件：通过 get_private_file_url (非标准，部分实现支持)
         if (!e.group && data.file_id) {
             try {
                 const result = await e.bot.sendApi('get_private_file_url', {
@@ -388,7 +449,6 @@ export class mediaInfo extends plugin {
             } catch (err) {}
         }
 
-        // 如果仍然没有，抛出错误
         throw new Error('无法获取文件下载链接（url 为空且 file_id 获取失败）')
     }
 
@@ -594,7 +654,11 @@ export class mediaInfo extends plugin {
 
                 // 对 GIF 或 APNG 显示帧信息
                 if (info.format === 'GIF' || info.format === 'APNG') {
-                    if (info.frames !== null) lines.push(`帧数：${info.frames} 帧`)
+                    if (info.frames !== null && info.frames !== undefined) {
+                        lines.push(`帧数：${info.frames} 帧`)
+                    } else {
+                        lines.push(`帧数：未知`)
+                    }
                     if (info.fps !== null && info.fps > 0) {
                         lines.push(`帧率：${info.fps.toFixed(2)} fps`)
                         const frameDuration = this.formatFrameDuration(info.fps)
