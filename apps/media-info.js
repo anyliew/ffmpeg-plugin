@@ -167,12 +167,14 @@ async function getImageInfoByFfprobe(filePath) {
         else if (format === 'PNG') format = 'PNG'
         else if (format === 'GIF') format = 'GIF'
         else if (format === 'WEBP') format = 'WEBP'
+        else if (format === 'APNG') format = 'APNG'   // 新增 APNG 识别
 
         const width = videoStream.width || 0
         const height = videoStream.height || 0
 
         let frames = null, fps = null
-        if (format === 'GIF') {
+        // 对 GIF 和 APNG 都提取帧数和帧率
+        if (format === 'GIF' || format === 'APNG') {
             frames = videoStream.nb_frames
             if (!frames && videoStream.avg_frame_rate) {
                 const [num, den] = videoStream.avg_frame_rate.split('/')
@@ -426,7 +428,7 @@ export class mediaInfo extends plugin {
 
     extractImagesFromMsg(messageArray) {
         if (!Array.isArray(messageArray)) return []
-        const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'tiff']
+        const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'tiff', 'apng']
         return messageArray.filter(seg => {
             if (seg.type === 'image') return true
             if (seg.type === 'file') {
@@ -590,7 +592,8 @@ export class mediaInfo extends plugin {
                     `分辨率：${info.width} x ${info.height}`
                 ]
 
-                if (info.format === 'GIF') {
+                // 对 GIF 或 APNG 显示帧信息
+                if (info.format === 'GIF' || info.format === 'APNG') {
                     if (info.frames !== null) lines.push(`帧数：${info.frames} 帧`)
                     if (info.fps !== null && info.fps > 0) {
                         lines.push(`帧率：${info.fps.toFixed(2)} fps`)

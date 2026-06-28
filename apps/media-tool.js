@@ -53,7 +53,8 @@ function generateTimestampFileName(targetFormat, originalFileName) {
         'wav': '转WAV',
         'gif': '转动图',
         'voice': '转语音',
-        'mp4': '转视频'
+        'mp4': '转视频',
+        'apng': '转APNG'   // 新增
     }
     const prefix = formatMap[targetFormat] || '转码'
 
@@ -204,7 +205,7 @@ export class mediaTool extends plugin {
     constructor() {
         super({
             name: '[ffmpeg-plugin]多媒体工具箱',
-            dsc: '视频转GIF、GIF分解、GIF打包ZIP、视频转语音、音视频转MP3/FLAC/WAV、GIF转MP4',
+            dsc: '视频转GIF、GIF分解、GIF打包ZIP、视频转语音、音视频转MP3/FLAC/WAV、GIF转MP4、转APNG',
             event: 'message',
             priority: 310,
             rule: [
@@ -216,7 +217,8 @@ export class mediaTool extends plugin {
                 { reg: '^#转mp3$', fnc: 'convertToMp3' },
                 { reg: '^#转flac$', fnc: 'convertToFlac' },
                 { reg: '^#转wav$', fnc: 'convertToWav' },
-                { reg: '^#转视频$', fnc: 'convertGifToVideo' }
+                { reg: '^#转视频$', fnc: 'convertGifToVideo' },
+                { reg: '^#转apng$', fnc: 'convertToApng' }   // 新增
             ]
         })
     }
@@ -528,6 +530,30 @@ export class mediaTool extends plugin {
         const cmd = `ffmpeg ${loopFlag} -i "${inputGifPath}" ${loopFlag} -i "${bgmPath}" -map 0:v -map 1:a -c:v libx264 -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -pix_fmt yuv420p -c:a aac -t ${targetDuration} -movflags +faststart "${outputMp4Path}" -y`
         await this.runFFmpeg(cmd, 180000)
         return outputMp4Path
+    }
+
+    /**
+     * 转换为 APNG
+     * 支持：静态图片、GIF、视频
+     * 视频限制：最长10秒，帧率10fps，宽度缩放至320，保持比例
+     */
+    async convertToApngFile(inputPath, outputPath, inputType) {
+        let cmd = ''
+        if (inputType === 'image') {
+            // 静态图片或GIF，保留原帧率
+            // 使用 -plays 0 无限循环（对静态图片无影响）
+            cmd = `ffmpeg -i "${inputPath}" -c:v apng -pred mixed -plays 0 "${outputPath}" -y`
+        } else if (inputType === 'gif') {
+            // GIF 转 APNG，保留原帧率，无限循环
+            cmd = `ffmpeg -i "${inputPath}" -c:v apng -pred mixed -plays 0 "${outputPath}" -y`
+        } else if (inputType === 'video') {
+            // 视频转 APNG：限制时长10秒，帧率10，宽度320，无限循环
+            cmd = `ffmpeg -i "${inputPath}" -c:v apng -vf "fps=10,scale=320:-1" -t 10 -pred mixed -plays 0 "${outputPath}" -y`
+        } else {
+            throw new Error('不支持的媒体类型')
+        }
+        await this.runFFmpeg(cmd, 180000)
+        return outputPath
     }
 
     async sendFileAsMessage(e, filePath, displayName) {
@@ -910,6 +936,82 @@ export class mediaTool extends plugin {
         } catch (err) {
             logger.error(`[转视频] 失败: ${err.message}`)
             await this.sendErrorAsForward(e, `转视频失败: ${err.message}`)
+        } finally {
+            await cleanupTempFile(inputTempPath)
+            await cleanupTempFile(outputTempPath)
+        }
+        return true
+    }
+
+    // ================= 新增：转 APNG =================
+
+    async convertToApng(e) {
+        let inputTempPath = null, outputTempPath = null
+        try {
+            await e.reply('⏳ 正在转换为 APNG 图片，请稍等...')
+
+            // 1. 优先获取图片（含 GIF），其次视频
+            let targetMedia = null
+            let mediaType = ''
+
+            // 先尝试图片
+            const image = await this.getTargetImage(e)
+            if (image) {
+                // 判断是否为 GIF
+                const tempPath = await downloadImageToTemp(image.url)
+                const format = await getImageFormatByFfprobe(tempPath)
+                await cleanupTempFile(tempPath)
+                if (format === 'GIF') {
+                    mediaType = 'gif'
+                } else {
+                    mediaType = 'image'
+                }
+                targetMedia = image
+            }
+
+            // 如果没有图片，尝试视频
+            if (!targetMedia) {
+                const video = await this.getTargetVideo(e)
+                if (video) {
+                    targetMedia = video
+                    mediaType = 'video'
+                }
+            }
+
+            if (!targetMedia) {
+                await this.sendErrorAsForward(e, '请回复或引用一张图片（含GIF）或一个视频文件，然后发送 #转apng')
+                return true
+            }
+
+            // 2. 下载媒体
+            let fileUrl, fileName
+            if (mediaType === 'image' || mediaType === 'gif') {
+                fileUrl = targetMedia.url
+                fileName = targetMedia.segment?.data?.filename || 'image.png'
+                inputTempPath = await downloadImageToTemp(fileUrl)
+            } else { // video
+                fileUrl = targetMedia.fileUrl
+                fileName = targetMedia.fileName
+                inputTempPath = getTempFilePath(path.extname(fileName) || '.mp4')
+                await downloadFile(fileUrl, inputTempPath)
+            }
+
+            logger.info(`[转APNG] 输入类型: ${mediaType}, 文件名: ${fileName}`)
+
+            // 3. 转码为 APNG
+            const outputFileName = generateTimestampFileName('apng', fileName)
+            outputTempPath = path.join(ensureTempDir(), outputFileName)
+            await this.convertToApngFile(inputTempPath, outputTempPath, mediaType)
+
+            // 4. 发送图片（APNG 可直接作为图片发送）
+            const outStat = await fs.promises.stat(outputTempPath)
+            logger.info(`[转APNG] APNG 生成完成，大小: ${formatSizeMB(outStat.size)}`)
+            await e.reply(segment.image(outputTempPath))
+            logger.info(`[转APNG] 图片发送成功`)
+
+        } catch (err) {
+            logger.error(`[转APNG] 失败: ${err.message}`)
+            await this.sendErrorAsForward(e, `转 APNG 失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
             await cleanupTempFile(outputTempPath)

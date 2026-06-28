@@ -131,7 +131,7 @@ async function buildHelpHtml(icons) {
     {
       icon: mediaIcon,
       name: '多媒体工具箱',
-      desc: '视频转GIF、GIF分解打包、音频/视频格式转换、GIF转MP4',
+      desc: '视频转GIF、GIF分解打包、音频/视频格式转换、GIF转MP4、转APNG',
       commands: [
         { cmd: '#转动图 / #转gif', desc: '将视频转换为 GIF 动图' },
         { cmd: '#动图分解 / #gif分解', desc: '将 GIF 动图分解为 PNG 帧序列' },
@@ -140,7 +140,8 @@ async function buildHelpHtml(icons) {
         { cmd: '#转mp3', desc: '将音/视频文件转换为 MP3 音频文件' },
         { cmd: '#转flac', desc: '将音/视频文件转换为 FLAC 无损音频' },
         { cmd: '#转wav', desc: '将音/视频文件转换为 WAV 音频文件' },
-        { cmd: '#转视频', desc: '将 GIF 动图转换为带背景音乐的 MP4 视频' }
+        { cmd: '#转视频', desc: '将 GIF 动图转换为带背景音乐的 MP4 视频' },
+        { cmd: '#转apng', desc: '将图片/GIF/视频转换为 APNG 动图（PNG动画）' }
       ]
     },
     {
