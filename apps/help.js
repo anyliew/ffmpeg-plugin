@@ -59,16 +59,21 @@ async function loadIconDataUri(name) {
 }
 
 async function loadAllIcons() {
-  const [ffmpeg, update, version, clip, media, help, info] = await Promise.all([
+  const [ffmpeg, update, version, clip, media, help, info, image, color, gif, grid, text] = await Promise.all([
     loadIconDataUri('ffmpeg'),
     loadIconDataUri('update'),
     loadIconDataUri('version'),
     loadIconDataUri('clip'),
     loadIconDataUri('media'),
     loadIconDataUri('help'),
-    loadIconDataUri('info')
+    loadIconDataUri('info'),
+    loadIconDataUri('image'),
+    loadIconDataUri('color'),
+    loadIconDataUri('gif'),
+    loadIconDataUri('grid'),
+    loadIconDataUri('text')
   ])
-  return { ffmpeg, update, version, clip, media, help, info }
+  return { ffmpeg, update, version, clip, media, help, info, image, color, gif, grid, text }
 }
 
 async function buildHelpHtml(icons) {
@@ -87,6 +92,11 @@ async function buildHelpHtml(icons) {
   const mediaIcon   = icons.media   ? `<img src="${icons.media}"   style="${moduleIconStyle}">` : '🔧'
   const helpIcon    = icons.help    ? `<img src="${icons.help}"    style="${moduleIconStyle}">` : '📖'
   const infoIcon    = icons.info    ? `<img src="${icons.info}"    style="${moduleIconStyle}">` : '📋'
+  const imageIcon   = icons.image   ? `<img src="${icons.image}"   style="${moduleIconStyle}">` : '🖼️'
+  const colorIcon   = icons.color   ? `<img src="${icons.color}"   style="${moduleIconStyle}">` : '🎨'
+  const gifIcon     = icons.gif     ? `<img src="${icons.gif}"     style="${moduleIconStyle}">` : '🎞️'
+  const gridIcon    = icons.grid    ? `<img src="${icons.grid}"    style="${moduleIconStyle}">` : '🧩'
+  const textIcon    = icons.text    ? `<img src="${icons.text}"    style="${moduleIconStyle}">` : '🔤'
 
   const modules = [
     {
@@ -143,6 +153,71 @@ async function buildHelpHtml(icons) {
         { cmd: '#转视频', desc: '将 GIF 动图转换为带背景音乐的 MP4 视频' },
         { cmd: '#转apng', desc: '将图片/GIF/视频转换为 APNG 动图（PNG动画）' }
       ]
+    },
+    {
+      icon: imageIcon,
+      name: '基础图片处理',
+      desc: '翻转、灰度、旋转、缩放、裁剪、反色、滤镜等（静态图与 GIF 均支持）',
+      commands: [
+        { cmd: '#水平翻转 / #左翻 / #右翻', desc: '水平镜像翻转图片' },
+        { cmd: '#竖直翻转 / #上翻 / #下翻', desc: '竖直翻转图片（上下颠倒）' },
+        { cmd: '#灰度图 / #黑白', desc: '转为黑白灰度图' },
+        { cmd: '#旋转 [角度]', desc: '旋转指定角度，默认 90°，如：#旋转 45' },
+        { cmd: '#缩放 尺寸', desc: '缩放：100x100、100x、x100、50%' },
+        { cmd: '#裁剪 尺寸', desc: '居中裁剪：100x100、2:1' },
+        { cmd: '#反相 / #反色', desc: '反色处理（负片效果）' },
+        { cmd: '#轮廓 / #浮雕', desc: '轮廓描边 / 浮雕效果' },
+        { cmd: '#模糊 [强度]', desc: '高斯模糊，默认 1.6，如：#模糊 5' },
+        { cmd: '#锐化', desc: '锐化图片细节' },
+        { cmd: '#像素化 / #马赛克 [强度]', desc: '像素化（马赛克），默认 8' }
+      ],
+      note: '💡 使用方法：回复/引用一条图片消息，或直接发送图片 + 命令；GIF 动图会逐帧处理并保留动画'
+    },
+    {
+      icon: colorIcon,
+      name: '颜色 / 滤镜 / 生成',
+      desc: '颜色滤镜、纯色图、渐变图',
+      commands: [
+        { cmd: '#颜色滤镜 颜色', desc: '给图片叠加指定颜色滤镜' },
+        { cmd: '#纯色图 颜色 [尺寸]', desc: '生成纯色图，默认 500x500，如：#纯色图 红色 300x300' },
+        { cmd: '#渐变图 [方向] 颜色1 颜色2', desc: '生成渐变图，如：#渐变图 上下 红 蓝、#渐变图 45 #66ccff #ff66cc' }
+      ],
+      note: '💡 颜色支持：#66ccff、red、红色、102,204,255；渐变方向：上下 / 左右 / 角度数字（默认左右）'
+    },
+    {
+      icon: gifIcon,
+      name: 'GIF 动图处理',
+      desc: '倒放、正放倒放、变速、多图合成',
+      commands: [
+        { cmd: '#gif倒放 / #倒放', desc: '将 GIF 倒序播放' },
+        { cmd: '#gif正放倒放 / #正放倒放', desc: '正放一遍再倒放一遍' },
+        { cmd: '#gif变速 倍率', desc: '调整速度：0.5x、50%、20FPS、0.05s' },
+        { cmd: '#gif合成 [间隔]', desc: '多张图片合成为 GIF，间隔默认 100ms' },
+        { cmd: '#动图分解 / #gif分解', desc: '将 GIF 分解为 PNG 帧序列' },
+        { cmd: '#动图打包 / #gif打包', desc: '将 GIF 所有帧打包为 ZIP' }
+      ],
+      note: '💡 合成请一次发送多张图片（≥2 张）；帧间隔需 ≥ 20ms（即 ≤ 50FPS）'
+    },
+    {
+      icon: gridIcon,
+      name: '网格 / 拼接',
+      desc: '四宫格、九宫格、横向/纵向拼接',
+      commands: [
+        { cmd: '#四宫格', desc: '将图片切成 2×2 四块' },
+        { cmd: '#九宫格', desc: '将图片切成 3×3 九块' },
+        { cmd: '#横向拼接', desc: '多张图片横向拼接（左→右）' },
+        { cmd: '#纵向拼接', desc: '多张图片纵向拼接（上→下）' }
+      ],
+      note: '💡 切图会先居中正方形裁剪；拼接至少需要 2 张图片，结果以合并转发形式发送'
+    },
+    {
+      icon: textIcon,
+      name: '文字转图',
+      desc: '把文字渲染成图片',
+      commands: [
+        { cmd: '#文字转图 文字', desc: '将文字转换为图片，支持换行，最长 1000 字' }
+      ],
+      note: '💡 如：#文字转图 你好\\n世界'
     },
     {
       icon: helpIcon,
