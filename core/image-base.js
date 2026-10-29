@@ -1,14 +1,29 @@
 import fs from 'fs'
-import * as Img from '../utils/img-utils.js'
-
-const { sharp, ops, parseColor, COLOR_TIPS } = Img
-
-// ================= 参数解析 =================
+import sharp from 'sharp'
+import {
+  ops,
+  readFrames,
+  mapFrames,
+  packFrames,
+  solidColor,
+  gradientImage,
+  textToImage,
+  gridSplit,
+  joinImages
+} from '../core/sharp-ops.js'
+import { parseColor, COLOR_TIPS } from '../core/color.js'
+import { downloadBuffer, downloadImageToTemp, writeTemp, delayedRemove } from '../core/io.js'
 
 const SIZE_RE = /^(\d{1,4})\s*[*xX,，]\s*(\d{1,4})$/
 const SIZE_ONE_RE = /^(\d{1,4})\s*[*xX,，]\s*$|^\s*[*xX,，]\s*(\d{1,4})$/
 const PERCENT_RE = /^(\d{1,3})%$/
 const RATIO_RE = /^(\d{1,2})\s*[:：比]\s*(\d{1,2})$/
+
+/** 帧间隔裁剪（与 io 的 MIN_DELAY=20 保持一致：最小 20ms） */
+function clampFrameDelay(d) {
+  const v = Math.round(Number(d) || 100)
+  return Math.max(20, Math.min(65535, v))
+}
 
 /** 解析缩放参数：100x100 / 100x / x100 / 50% */
 function parseResize(arg) {
@@ -25,11 +40,16 @@ function parseResize(arg) {
   return null
 }
 
-/** 解析裁剪参数：100x100 / 2:1 */
+/** 解析裁剪参数：100x100 / 100x / x100 / 2:1 */
 function parseCrop(arg, size) {
   const s = String(arg || '').trim()
   let m = SIZE_RE.exec(s)
   if (m) return { width: Number(m[1]), height: Number(m[2]) }
+  m = SIZE_ONE_RE.exec(s)
+  if (m) {
+    if (m[1]) return { width: Number(m[1]) }
+    if (m[2]) return { height: Number(m[2]) }
+  }
   m = RATIO_RE.exec(s)
   if (m) {
     const wp = Number(m[1])
@@ -65,51 +85,11 @@ function toSizeArgs(tokens) {
   return null
 }
 
-// ================= 插件主体 =================
-
-export class imageTool extends plugin {
-  constructor() {
-    super({
-      name: '[ffmpeg-plugin]图片工具箱',
-      dsc: '图片翻转/灰度/旋转/缩放/裁剪/滤镜、GIF 倒放变速合成、四宫格九宫格拼接、文字转图',
-      event: 'message',
-      priority: 320,
-      rule: [
-        // —— 基础图片处理 ——
-        { reg: /^#?(水平翻转|左右翻转|镜像翻转|左翻|右翻)$/, fnc: 'flipHorizontal' },
-        { reg: /^#?(竖直翻转|垂直翻转|上下翻转|上翻|下翻)$/, fnc: 'flipVertical' },
-        { reg: /^#?(灰度图?|黑白图?|去色)$/, fnc: 'grey' },
-        { reg: /^#?旋转\s*(-?\d{1,4}(?:\.\d+)?)\s*度?$/, fnc: 'rotate' },
-        { reg: /^#?旋转$/, fnc: 'rotate' },
-        { reg: /^#?缩放\s*(\S+)$/, fnc: 'resize' },
-        { reg: /^#?裁剪\s*(\S+)$/, fnc: 'crop' },
-        { reg: /^#?(反相|反色|负片)$/, fnc: 'invert' },
-        { reg: /^#?轮廓$/, fnc: 'contour' },
-        { reg: /^#?浮雕$/, fnc: 'emboss' },
-        { reg: /^#?模糊\s*(\d{1,3}(?:\.\d+)?)?$/, fnc: 'blur' },
-        { reg: /^#?锐化$/, fnc: 'sharpen' },
-        { reg: /^#?(像素化|马赛克)\s*(\d{1,4})?$/, fnc: 'pixelate' },
-        // —— 颜色 / 滤镜 ——
-        { reg: /^#?(颜色滤镜|滤镜)\s*(.+)$/, fnc: 'colorFilter' },
-        { reg: /^#?纯色图?\s*(.+)$/, fnc: 'colorImage' },
-        { reg: /^#?渐变图?\s*(.+)$/, fnc: 'gradientImage' },
-        // —— GIF ——
-        { reg: /^#?(gif)?倒放$/i, fnc: 'gifReverse' },
-        { reg: /^#?(gif)?正放倒放$/i, fnc: 'gifObverseReverse' },
-        { reg: /^#?(gif)?变速\s*(\S+)$/i, fnc: 'gifChangeSpeed' },
-        { reg: /^#?(gif)?合成\s*(\d{1,5})?$/i, fnc: 'gifJoin' },
-        // —— 网格 / 拼接 ——
-        { reg: /^#?四宫格$/, fnc: 'fourGrid' },
-        { reg: /^#?九宫格$/, fnc: 'nineGrid' },
-        { reg: /^#?(横向拼接|横向合成|横向合并)$/, fnc: 'horizontalJoin' },
-        { reg: /^#?(纵向拼接|竖向拼接|纵向合成|纵向合并)$/, fnc: 'verticalJoin' },
-        // —— 文字转图 ——
-        { reg: /^#?(文字转图|文字成图|文转图|文字生成图片)\s*([\s\S]+)$/, fnc: 'text2Image' },
-        { reg: /^#?(文字转图|文字成图|文转图|文字生成图片)$/, fnc: 'text2Image' }
-      ]
-    })
-  }
-
+/**
+ * 图片处理公共基类：聚合图片获取、发送、参数解析、逐帧处理等公共逻辑。
+ * 具体插件（基础图片 / 颜色 / GIF / 网格拼接 / 文字转图）继承本类并仅提供各自的 rule 与指令方法。
+ */
+export class ImageBase extends plugin {
   // ================= 消息 / 图片获取 =================
 
   msgSegments(raw) {
@@ -188,13 +168,20 @@ export class imageTool extends plugin {
     return url
   }
 
-  /** 收集图片 Buffer：优先引用消息，其次当前消息 */
+  /** 收集图片 Buffer：引用消息 + 当前消息取并集（按 url/file_id 去重） */
   async collectImages(e, min = 1) {
-    let segs = this.imageSegments(await this.getQuotedSegments(e))
-    if (segs.length < min) {
-      const cur = this.imageSegments(e.message)
-      if (cur.length > segs.length) segs = cur
+    const quoted = this.imageSegments(await this.getQuotedSegments(e))
+    const current = this.imageSegments(e.message)
+    const seen = new Set()
+    const segs = []
+    const push = (seg) => {
+      const key = seg?.data?.file_id || seg?.data?.url || seg?.url || ''
+      if (seen.has(key)) return
+      seen.add(key)
+      segs.push(seg)
     }
+    quoted.forEach(push)
+    current.forEach(push)
     if (!segs.length) return []
     const list = []
     for (const seg of segs) {
@@ -202,7 +189,7 @@ export class imageTool extends plugin {
       if (typeof url === 'object' && url.base64) {
         list.push(Buffer.from(url.base64, 'base64'))
       } else {
-        list.push(await Img.downloadBuffer(url))
+        list.push(await downloadBuffer(url))
       }
     }
     return list
@@ -211,18 +198,18 @@ export class imageTool extends plugin {
   // ================= 结果发送 =================
 
   async sendImage(e, buffer, ext = '.png') {
-    const file = await Img.writeTemp(buffer, ext)
+    const file = await writeTemp(buffer, ext)
     try {
       await e.reply(segment.image(file))
     } finally {
-      Img.delayedRemove(file, 90)
+      delayedRemove(file, 90)
     }
   }
 
   /** 多图发送：合并转发优先，失败逐张发送 */
   async sendImages(e, buffers, title = '图片助手') {
     const files = []
-    for (const b of buffers) files.push(await Img.writeTemp(b, '.png'))
+    for (const b of buffers) files.push(await writeTemp(b, '.png'))
     try {
       const uin = String(e.bot?.uin || e.self_id || 10000)
       const build = (contentOf) =>
@@ -249,7 +236,7 @@ export class imageTool extends plugin {
       logger.warn(`[图片工具] 合并转发失败，改为逐张发送: ${err.message}`)
       for (const f of files) await e.reply(segment.image(f))
     } finally {
-      Img.delayedRemove(files, 90)
+      delayedRemove(files, 90)
     }
   }
 
@@ -270,7 +257,7 @@ export class imageTool extends plugin {
   async firstImage(e) {
     const buffers = await this.collectImages(e, 1)
     if (!buffers.length) return null
-    return await Img.readFrames(buffers[0])
+    return await readFrames(buffers[0])
   }
 
   /** 单图处理通用流程 */
@@ -285,8 +272,8 @@ export class imageTool extends plugin {
         await e.reply(`⏳ 正在${tip}（共 ${img.frames.length} 帧），请稍候...`, true)
       }
       const op = await makeOp(img)
-      const frames = await Img.mapFrames(img.frames, op)
-      const { buffer, ext } = await Img.packFrames(frames, img.delays, img.animated)
+      const frames = await mapFrames(img.frames, op)
+      const { buffer, ext } = await packFrames(frames, img.delays, img.animated)
       await this.sendImage(e, buffer, ext)
       return true
     })
@@ -356,13 +343,12 @@ export class imageTool extends plugin {
   async crop(e) {
     const arg = this.argOf(e, /^#?裁剪\s*(\S+)/)
     if (!arg) {
-      await e.reply('❌ 请使用正确的裁剪格式，如：#裁剪 100x100、#裁剪 2:1', true)
+      await e.reply('❌ 请使用正确的裁剪格式，如：#裁剪 100x100、#裁剪 100x、#裁剪 2:1', true)
       return true
     }
-    let opt = null
     return await this.processSingle(e, '裁剪', (img) => {
-      opt = parseCrop(arg, { width: img.width, height: img.height })
-      if (!opt) throw new Error('请使用正确的裁剪格式，如：#裁剪 100x100、#裁剪 2:1')
+      const opt = parseCrop(arg, { width: img.width, height: img.height })
+      if (!opt) throw new Error('请使用正确的裁剪格式，如：#裁剪 100x100、#裁剪 100x、#裁剪 2:1')
       return ops.crop({ width: opt.width, height: opt.height })
     })
   }
@@ -417,7 +403,7 @@ export class imageTool extends plugin {
         await e.reply(`❌ 无法识别颜色「${colorArg}」\n${COLOR_TIPS}`, true)
         return true
       }
-      const buffer = await Img.solidColor(color, size?.width || 500, size?.height || 500)
+      const buffer = await solidColor(color, size?.width || 500, size?.height || 500)
       await this.sendImage(e, buffer)
       return true
     })
@@ -461,7 +447,7 @@ export class imageTool extends plugin {
         await e.reply('❌ 请至少指定 1 个颜色，例：#渐变图 上下 红 蓝', true)
         return true
       }
-      const buffer = await Img.gradientImage(colors, angle, size?.width || 500, size?.height || 500)
+      const buffer = await gradientImage(colors, angle, size?.width || 500, size?.height || 500)
       await this.sendImage(e, buffer)
       return true
     })
@@ -492,7 +478,7 @@ export class imageTool extends plugin {
     return await this.withGif(e, '倒放', async (img) => {
       const frames = img.frames.slice().reverse()
       const delays = img.delays.slice().reverse()
-      const { buffer, ext } = await Img.packFrames(frames, delays, true)
+      const { buffer, ext } = await packFrames(frames, delays, true)
       await this.sendImage(e, buffer, ext)
       return true
     })
@@ -502,7 +488,7 @@ export class imageTool extends plugin {
     return await this.withGif(e, '正放倒放', async (img) => {
       const frames = img.frames.concat(img.frames.slice(0, -1).reverse())
       const delays = img.delays.concat(img.delays.slice(0, -1).reverse())
-      const { buffer, ext } = await Img.packFrames(frames, delays, true)
+      const { buffer, ext } = await packFrames(frames, delays, true)
       await this.sendImage(e, buffer, ext)
       return true
     })
@@ -539,8 +525,10 @@ export class imageTool extends plugin {
         )
         return true
       }
-      const delays = img.delays.map(() => Math.round(duration * 1000))
-      const { buffer, ext } = await Img.packFrames(img.frames, delays, true)
+      // 按比例缩放每帧原始间隔，保留原图可变帧时序
+      const factor = duration / avg
+      const delays = img.delays.map((d) => clampFrameDelay(Math.round(d * factor)))
+      const { buffer, ext } = await packFrames(img.frames, delays, true)
       await this.sendImage(e, buffer, ext)
       return true
     })
@@ -559,6 +547,8 @@ export class imageTool extends plugin {
         await e.reply('❌ 一次最多合成 60 张图片', true)
         return true
       }
+      // 说明：合成语义为“每张图取一帧”，动图输入仅取其首帧（page:0），
+      // 这样既避免多张动图展开导致帧数爆炸，也无需全量解码整段动画。
       const inputs = []
       for (const b of buffers) {
         const meta = await sharp(b).metadata()
@@ -570,7 +560,7 @@ export class imageTool extends plugin {
           height: meta.pageHeight || meta.height
         })
       }
-      const { buffer, ext } = await Img.joinImages(inputs, 'gif', delay)
+      const { buffer, ext } = await joinImages(inputs, 'gif', delay)
       await this.sendImage(e, buffer, ext)
       return true
     })
@@ -593,7 +583,7 @@ export class imageTool extends plugin {
         await e.reply('❌ 请回复/引用一张图片，或直接发送图片 + 命令', true)
         return true
       }
-      const parts = await Img.gridSplit(buffers[0], n)
+      const parts = await gridSplit(buffers[0], n)
       await this.sendImages(e, parts, n === 2 ? '四宫格' : '九宫格')
       return true
     })
@@ -612,14 +602,14 @@ export class imageTool extends plugin {
       }
       const inputs = []
       for (const b of buffers) {
-        const img = await Img.readFrames(b)
+        const img = await readFrames(b)
         inputs.push(img)
       }
       if (inputs.some((i) => i.animated)) {
         const total = Math.max(...inputs.map((i) => i.frames.length))
         if (total > 30) await e.reply(`⏳ 正在拼接（共 ${total} 帧），请稍候...`, true)
       }
-      const { buffer, ext } = await Img.joinImages(inputs, mode)
+      const { buffer, ext } = await joinImages(inputs, mode)
       await this.sendImage(e, buffer, ext)
       return true
     })
@@ -646,7 +636,7 @@ export class imageTool extends plugin {
         await e.reply('❌ 文字过长，请控制在 1000 字以内', true)
         return true
       }
-      const buffer = await Img.textToImage(text)
+      const buffer = await textToImage(text)
       await this.sendImage(e, buffer)
       return true
     })

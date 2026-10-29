@@ -1,14 +1,15 @@
 import fs from "node:fs/promises"
+import { notifyCommandError } from '../core/errorNotify.js'
 
 let updating = false
 
 export class ffmpegUpdate extends plugin {
   constructor() {
     super({
-      name: "[ffmpeg-plugin]FFmpeg插件更新",
+      name: "[FFmpeg-Plugin]FFmpeg插件更新",
       dsc: "#ff更新 / #ffmpeg-plugin更新",
       event: "message",
-      priority: -Infinity,
+      priority: -1,
       rule: [
         {
           reg: /^#(ff|ffmpeg-plugin)(强制)?更新$/i,
@@ -18,18 +19,15 @@ export class ffmpegUpdate extends plugin {
     })
   }
 
-  get isForce() {
-    return /强制/.test(this.e.msg)
-  }
-
-  async updateFFmpeg() {
-    if (!this.e.isMaster) {
-      await this.reply("只有主人可以使用此命令")
+  async updateFFmpeg(e) {
+    const isForce = /强制/.test(e.msg)
+    if (!e.isMaster) {
+      await e.reply("只有主人可以使用此命令")
       return false
     }
 
     if (updating) {
-      await this.reply("正在更新中，请稍后再试")
+      await e.reply("正在更新中，请稍后再试")
       return false
     }
 
@@ -46,22 +44,22 @@ export class ffmpegUpdate extends plugin {
       const exists = await fs.access(pluginPath).then(() => true).catch(() => false)
       if (!exists) {
         pushMsg(`未找到插件目录：${pluginPath}`)
-        await this.sendForwardOrPlain(messages)
+        await this.sendForwardOrPlain(messages, e)
         return false
       }
 
       const oldCommit = await this.getCommitId(pluginPath)
-      const cmd = this.isForce
+      const cmd = isForce
         ? await this.buildForceCommand(pluginPath)
         : "git pull"
 
-      logger.mark(`[FFmpeg] 开始${this.isForce ? "强制" : ""}更新`)
-      pushMsg(`开始${this.isForce ? "强制" : ""}更新 ffmpeg-plugin`)
+      logger.mark(`[FFmpeg] 开始${isForce ? "强制" : ""}更新`)
+      pushMsg(`开始${isForce ? "强制" : ""}更新 ffmpeg-plugin`)
 
       const ret = await this.exec(cmd, pluginPath)
       if (ret.error) {
         await this.handleGitError(ret, pluginPath, pushMsg)
-        await this.sendForwardOrPlain(messages)
+        await this.sendForwardOrPlain(messages, e)
         return false
       }
 
@@ -70,7 +68,7 @@ export class ffmpegUpdate extends plugin {
 
       if (isUpToDate) {
         pushMsg(`ffmpeg-plugin 已是最新\n最后更新时间：${time}`)
-        await this.sendForwardOrPlain(messages)
+        await this.sendForwardOrPlain(messages, e)
         return false
       }
 
@@ -85,11 +83,11 @@ export class ffmpegUpdate extends plugin {
       }
 
       pushMsg("更新完成（未自动重启，如需重启请手动操作）")
-      await this.sendForwardOrPlain(messages)
+      await this.sendForwardOrPlain(messages, e)
     } catch (err) {
-      logger.error(`[FFmpeg] 异常：${err}`)
+      await notifyCommandError(err, 'FFmpeg插件更新')
       pushMsg(`更新出错：${err.message}`)
-      await this.sendForwardOrPlain(messages)
+      await this.sendForwardOrPlain(messages, e)
     } finally {
       updating = false
     }
@@ -199,16 +197,16 @@ export class ffmpegUpdate extends plugin {
   }
 
   // 合并转发（群聊）或普通回复（私聊/失败时）
-  async sendForwardOrPlain(messages) {
+  async sendForwardOrPlain(messages, e) {
     if (!messages.length) return
 
     const fullText = messages.join("\n\n")   // 合并转发的每一条消息之间用两个换行分隔
 
     try {
       // 如果是群聊且支持合并转发
-      if (this.e.group && typeof this.e.group.makeForwardMsg === "function") {
-        const botInfo = this.e.bot || {}
-        const botUserId = botInfo.uin || this.e.self_id || 10000
+      if (e.group && typeof e.group.makeForwardMsg === "function") {
+        const botInfo = e.bot || {}
+        const botUserId = botInfo.uin || e.self_id || 10000
         const botNickname = botInfo.nickname || "芙芙酱"
 
         // 将每条消息拆分成独立的一条转发消息（保留原有分段感）
@@ -218,8 +216,8 @@ export class ffmpegUpdate extends plugin {
           message: msg
         }))
 
-        const forward = await this.e.group.makeForwardMsg(forwardMsgs)
-        await this.e.reply(forward)
+        const forward = await e.group.makeForwardMsg(forwardMsgs)
+        await e.reply(forward)
         return
       }
     } catch (err) {
@@ -228,6 +226,6 @@ export class ffmpegUpdate extends plugin {
 
     // 降级：逐条发送或一次性发送（避免刷屏可选择一次性）
     // 这里选择一次性发送（用分隔符）
-    await this.e.reply(fullText)
+    await e.reply(fullText)
   }
 }

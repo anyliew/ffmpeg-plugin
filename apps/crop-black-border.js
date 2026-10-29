@@ -360,7 +360,7 @@ async function delayedDelete(filePaths, delay) {
 export class cropBlackBorder extends plugin {
     constructor() {
         super({
-            name: '[裁剪插件]去黑边/去白边/去纯色',
+            name: '[FFmpeg-Plugin]去黑边/去白边/去纯色',
             event: 'message',
             priority: 1000,
             rule: [

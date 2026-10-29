@@ -1,15 +1,19 @@
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import axios from 'axios'
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import { createWriteStream } from 'fs'
 import os from 'os'
 import archiver from 'archiver'
+import axios from 'axios'
+import { downloadImageToTemp, MAX_MEDIA_MB, safeJoin } from './io.js'
 
 const execPromise = promisify(exec)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+/** #转视频 允许指定的最大时长（秒），防止生成超大/超长视频 */
+const MAX_VIDEO_SEC = 600
 
 // ================= 公共辅助函数 =================
 
@@ -54,7 +58,7 @@ function generateTimestampFileName(targetFormat, originalFileName) {
         'gif': '转动图',
         'voice': '转语音',
         'mp4': '转视频',
-        'apng': '转APNG'   // 新增
+        'apng': '转APNG'
     }
     const prefix = formatMap[targetFormat] || '转码'
 
@@ -62,22 +66,49 @@ function generateTimestampFileName(targetFormat, originalFileName) {
 }
 
 /**
- * 从 resources/mp3 目录随机选择一个 mp3 文件
+ * 解析背景音乐路径
+ *   规则：
+ *   1. 指定 name 时：优先 resources/mp3/{name}.mp3
+ *   2. 其次 resources/mp3/{name}/ 目录中随机取一条 .mp3
+ *   3. 未指定 name 时：从 resources/mp3/ 根目录随机取一条 .mp3
+ * 返回 { path, label } 或 null
  */
-function getRandomBgmPath() {
+function resolveBgmPath(name) {
     const bgmDir = path.join(__dirname, '..', 'resources', 'mp3')
     if (!fs.existsSync(bgmDir)) {
         fs.mkdirSync(bgmDir, { recursive: true })
         logger.warn(`[多媒体插件] 背景音乐目录不存在，已创建: ${bgmDir}`)
         return null
     }
-    const files = fs.readdirSync(bgmDir).filter(f => f.endsWith('.mp3'))
-    if (files.length === 0) {
-        logger.warn(`[多媒体插件] 背景音乐目录无 mp3 文件: ${bgmDir}`)
+
+    const pickRandomMp3 = (dir) => {
+        const files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.mp3'))
+        if (files.length === 0) return null
+        const pick = files[Math.floor(Math.random() * files.length)]
+        return { path: path.join(dir, pick), label: pick }
+    }
+
+    if (name && name.trim()) {
+        const trimmed = name.trim()
+        // 1. 直接文件 resources/mp3/{name}.mp3
+        const directFile = safeJoin(bgmDir, `${trimmed}.mp3`)
+        if (directFile && fs.existsSync(directFile) && fs.statSync(directFile).isFile()) {
+            return { path: directFile, label: `${trimmed}.mp3` }
+        }
+        // 2. 目录 resources/mp3/{name}/ 中随机一条 .mp3
+        const subDir = safeJoin(bgmDir, trimmed)
+        if (subDir && fs.existsSync(subDir) && fs.statSync(subDir).isDirectory()) {
+            const picked = pickRandomMp3(subDir)
+            if (picked) {
+                return { path: picked.path, label: `${trimmed}/${picked.label}` }
+            }
+        }
+        logger.warn(`[多媒体插件] 未找到指定背景音乐: ${trimmed}（请确认 resources/mp3/${trimmed}.mp3 或 resources/mp3/${trimmed}/ 目录存在）`)
         return null
     }
-    const randomFile = files[Math.floor(Math.random() * files.length)]
-    return path.join(bgmDir, randomFile)
+
+    // 3. 未指定：根目录随机一条 .mp3
+    return pickRandomMp3(bgmDir)
 }
 
 /**
@@ -104,7 +135,8 @@ async function downloadFile(url, destPath) {
         url: url,
         responseType: 'stream',
         timeout: 60000,
-        maxContentLength: 200 * 1024 * 1024
+        maxContentLength: MAX_MEDIA_MB * 1024 * 1024,
+        maxBodyLength: MAX_MEDIA_MB * 1024 * 1024
     })
     const writer = createWriteStream(destPath)
     response.data.pipe(writer)
@@ -113,24 +145,6 @@ async function downloadFile(url, destPath) {
         writer.on('error', reject)
     })
     return destPath
-}
-
-async function downloadImageToTemp(url) {
-    const response = await axios({
-        method: 'GET',
-        url: url,
-        responseType: 'stream',
-        timeout: 15000
-    })
-    const ext = path.extname(url).split('?')[0] || '.tmp'
-    const tempFile = path.join(os.tmpdir(), `img_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`)
-    const writer = createWriteStream(tempFile)
-    response.data.pipe(writer)
-    await new Promise((resolve, reject) => {
-        writer.on('finish', resolve)
-        writer.on('error', reject)
-    })
-    return tempFile
 }
 
 function formatSizeMB(bytes) {
@@ -199,30 +213,14 @@ async function packPngsToZip(pngFiles, zipOutputPath) {
     })
 }
 
-// ================= 主插件类 =================
+// ================= 主插件基类 =================
 
-export class mediaTool extends plugin {
-    constructor() {
-        super({
-            name: '[ffmpeg-plugin]多媒体工具箱',
-            dsc: '视频转GIF、GIF分解、GIF打包ZIP、视频转语音、音视频转MP3/FLAC/WAV、GIF转MP4、转APNG',
-            event: 'message',
-            priority: 310,
-            rule: [
-                { reg: /^#(转动图|转gif)$/i, fnc: 'convertToGif' },
-                { reg: /^#?动图分解$/, fnc: 'decomposeGif' },
-                { reg: /^#?gif分解$/i, fnc: 'decomposeGif' },
-                { reg: '^#?(动图打包|gif打包)$', fnc: 'packGifToZip' },
-                { reg: '^#转语音$', fnc: 'convertToVoice' },
-                { reg: '^#转mp3$', fnc: 'convertToMp3' },
-                { reg: '^#转flac$', fnc: 'convertToFlac' },
-                { reg: '^#转wav$', fnc: 'convertToWav' },
-                { reg: '^#转视频$', fnc: 'convertGifToVideo' },
-                { reg: '^#转apng$', fnc: 'convertToApng' }   // 新增
-            ]
-        })
-    }
-
+/**
+ * 多媒体处理公共基类：聚合音视频 / GIF 转码所需的全部辅助方法与 FFmpeg 封装。
+ * 具体插件（transcode / video / decompose）继承本类并仅提供各自的 rule 与指令方法，
+ * 以避免重复实现下载、引用解析、发送、错误处理等公共逻辑。
+ */
+export class MediaBase extends plugin {
     // ================= 消息提取方法 =================
 
     extractVideoFromMsg(messageArray) {
@@ -509,25 +507,38 @@ export class mediaTool extends plugin {
     }
 
     /**
-     * GIF 转 MP4，并添加随机背景音乐
-     * 优化：宽高强制偶数，时长最少15秒（短GIF循环）
+     * GIF 转 MP4，并添加背景音乐
+     * 优化：宽高强制偶数；时长逻辑：
+     *   - 指定 targetDuration（秒）时：严格使用该时长（短 GIF 自动循环填充，长 GIF 截断）
+     *   - 未指定时：默认至少 15 秒（短 GIF 循环）
      */
-    async convertGifToMp4(inputGifPath, outputMp4Path, bgmPath) {
+    async convertGifToMp4(inputGifPath, outputMp4Path, bgmPath, targetDuration = null) {
         // 1. 获取 GIF 原始时长
         const duration = await getMediaDuration(inputGifPath)
         logger.info(`[转视频] GIF 原始时长: ${duration} 秒`)
 
-        // 2. 目标时长：至少 15 秒
-        const targetDuration = Math.max(duration, 15)
-        logger.info(`[转视频] 目标视频时长: ${targetDuration} 秒`)
+        // 2. 计算目标时长与是否需循环
+        let finalDuration
+        let needLoop
+        if (targetDuration && targetDuration > 0) {
+            // 兜底封顶，防止绕过上层校验
+            finalDuration = Math.min(Math.max(targetDuration, 1), MAX_VIDEO_SEC)
+            needLoop = duration < finalDuration - 0.01
+            logger.info(`[转视频] 指定时长: ${finalDuration} 秒`)
+        } else {
+            // 默认：至少 15 秒，短 GIF 循环
+            finalDuration = Math.max(duration, 15)
+            needLoop = duration < 15
+            logger.info(`[转视频] 目标视频时长(默认≥15秒): ${finalDuration} 秒`)
+        }
 
-        // 3. 如果 duration < 15，需要循环播放 GIF 和背景音乐
-        const loopFlag = duration < 15 ? '-stream_loop -1' : ''
+        // 3. 如果需要循环，则对 GIF 与背景音乐都启用 stream_loop
+        const loopFlag = needLoop ? '-stream_loop -1' : ''
 
         // 4. 构建 ffmpeg 命令
         //    - 使用 scale 滤镜确保宽高为偶数
         //    - 循环播放（如果需要）并截断到目标时长
-        const cmd = `ffmpeg ${loopFlag} -i "${inputGifPath}" ${loopFlag} -i "${bgmPath}" -map 0:v -map 1:a -c:v libx264 -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -pix_fmt yuv420p -c:a aac -t ${targetDuration} -movflags +faststart "${outputMp4Path}" -y`
+        const cmd = `ffmpeg ${loopFlag} -i "${inputGifPath}" ${loopFlag} -i "${bgmPath}" -map 0:v -map 1:a -c:v libx264 -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -pix_fmt yuv420p -c:a aac -t ${finalDuration} -movflags +faststart "${outputMp4Path}" -y`
         await this.runFFmpeg(cmd, 180000)
         return outputMp4Path
     }
@@ -894,19 +905,66 @@ export class mediaTool extends plugin {
 
     // ================= GIF 转 MP4 =================
 
+    /**
+     * 解析 #转视频 参数：#转视频 音频文件名 时间
+     *   - 音频文件名：resources/mp3/{name}.mp3 或 resources/mp3/{name}/ 目录（可省略）
+     *   - 时间：秒数（可省略，省略则以 GIF 时长为准）
+     * 返回 { raw, bgmName, timeSec }
+     *   raw：命令之后的整串（用于“先把整串当音频名”的解析，支持 007 这类纯数字名）
+     * 说明：不使用 ^ 锚定，因为图文同消息时 e.msg 可能带 CQ 码前缀
+     */
+    parseVideoArgs(e) {
+        const msg = String(e.msg || '')
+        const idx = msg.indexOf('转视频')
+        const rest = idx >= 0 ? msg.slice(idx + '转视频'.length) : msg
+        const raw = rest.trim()
+        let bgmName = ''
+        let timeSec = null
+        if (raw) {
+            const parts = raw.split(/\s+/).filter(Boolean)
+            const last = parts[parts.length - 1]
+            if (/^\d+(?:\.\d+)?$/.test(last)) {
+                timeSec = parseFloat(last)
+                if (parts.length >= 2) bgmName = parts.slice(0, -1).join(' ')
+            } else {
+                bgmName = parts.join(' ')
+            }
+        }
+        return { raw, bgmName: bgmName.trim(), timeSec }
+    }
+
     async convertGifToVideo(e) {
         let inputTempPath = null, outputTempPath = null
         try {
+            // 1. 解析参数：音频文件名 时间（秒）
+            const parsed = this.parseVideoArgs(e)
+            let timeSec = parsed.timeSec
+
+            // 1.1 时长合法性 + 封顶，避免生成超大/超长视频
+            if (timeSec != null) {
+                if (!isFinite(timeSec) || timeSec <= 0) {
+                    await e.reply('❌ 时长需为大于 0 的秒数，如：#转视频 菲比 10', true)
+                    return true
+                }
+                if (timeSec > MAX_VIDEO_SEC) {
+                    await e.reply(`⚠️ 指定时长 ${timeSec}s 超过上限 ${MAX_VIDEO_SEC}s，已按 ${MAX_VIDEO_SEC}s 处理`, true)
+                    timeSec = MAX_VIDEO_SEC
+                } else if (timeSec < 1) {
+                    await e.reply('❌ 时长至少 1 秒，如：#转视频 菲比 10', true)
+                    return true
+                }
+            }
+
             await e.reply('⏳ 正在将 GIF 转为视频并添加背景音乐，请稍等...')
 
-            // 1. 获取目标 GIF
+            // 2. 获取目标 GIF
             const targetImage = await this.getTargetImage(e)
             if (!targetImage) {
                 await this.sendErrorAsForward(e, '请回复或引用一条包含 GIF 图片的消息，或直接发送带有 GIF 的命令。')
                 return true
             }
 
-            // 2. 下载 GIF
+            // 3. 下载 GIF
             inputTempPath = await downloadImageToTemp(targetImage.url)
             const format = await getImageFormatByFfprobe(inputTempPath)
             if (format !== 'GIF') {
@@ -914,22 +972,31 @@ export class mediaTool extends plugin {
                 return true
             }
 
-            // 3. 随机选择背景音乐
-            const bgmPath = getRandomBgmPath()
-            if (!bgmPath) {
-                await this.sendErrorAsForward(e, '未找到背景音乐文件，请在 resources/mp3 目录下放置至少一个 .mp3 文件。')
+            // 4. 解析背景音乐：先尝试“整串作为音频名”（支持 007 这类纯数字名），
+            //    未命中再按「音频名 + 秒数」拆分解析，最后兜底随机
+            let bgm = null
+            if (parsed.raw) bgm = resolveBgmPath(parsed.raw)
+            if (!bgm && parsed.bgmName) bgm = resolveBgmPath(parsed.bgmName)
+            if (!bgm) bgm = resolveBgmPath('')
+            if (!bgm) {
+                await this.sendErrorAsForward(e, '未找到背景音乐文件，请在 resources/mp3 目录下放置至少一个 .mp3 文件，或在命令中指定已存在的音频名。')
                 return true
             }
-            logger.info(`[转视频] 使用背景音乐: ${bgmPath}`)
+            logger.info(`[转视频] 使用背景音乐: ${bgm.path}`)
 
-            // 4. 转码（已包含宽高偶数 + 时长最少15秒循环）
+            // 5. 转码（已包含宽高偶数；指定时长则强制，否则默认≥15秒循环）
             const outputFileName = generateTimestampFileName('mp4', 'gif')
             outputTempPath = path.join(ensureTempDir(), outputFileName)
-            await this.convertGifToMp4(inputTempPath, outputTempPath, bgmPath)
+            await this.convertGifToMp4(inputTempPath, outputTempPath, bgm.path, timeSec)
 
-            // 5. 发送视频消息
+            // 6. 发送视频消息 + 背景音乐提示
             const outStat = await fs.promises.stat(outputTempPath)
             logger.info(`[转视频] MP4 生成完成，大小: ${formatSizeMB(outStat.size)}`)
+            const timeHint = timeSec ? `（时长 ${timeSec}s）` : ''
+            // 仅在用户显式带了参数时提示背景音乐，随机选曲时不再多发一条消息
+            if (parsed.raw) {
+                await e.reply(`🎵 背景音乐：${bgm.label}${timeHint}`)
+            }
             await e.reply(segment.video(outputTempPath))
             logger.info(`[转视频] 视频发送成功`)
 
