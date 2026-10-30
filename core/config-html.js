@@ -1,12 +1,12 @@
 // core/config-html.js
-// #ff配置 详情页 HTML 构建 —— 参考 karin-plugin-kkk 报错页的视觉风格：
-// 近黑背景 + 暗红强调色 + 等宽字体 + 分区标签（SECTION）+ pill 徽章 + 统计数字卡。
+// #ff配置 详情页 HTML 构建 —— 版式沿用 karin-plugin-kkk 报错页的分区结构
+// （SECTION 分区标签 + pill 徽章 + 统计数字卡），配色对齐 #ff版本 卡的浅色蓝青调。
 // 注意：本文件位于 core/（Yunzai loader 不扫描），export 安全，原因见 core/ffmpeg-info.js 顶部说明。
 import { escapeHtml } from './io.js'
 import { FONT_FACE } from './ffmpeg-info.js'
 
 /**
- * 生成 #ff配置 详情页 HTML（暗色 kkk 报错页风格）
+ * 生成 #ff配置 详情页 HTML（浅色主题，配色与 #ff版本 一致）
  * @param {object} d
  * @param {string} d.versionNumber   ffmpeg 版本号原始串
  * @param {object} d.meta            { buildSource, compileDate }
@@ -59,8 +59,8 @@ ${FONT_FACE}
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     font-family: "LXGW","NotoEmoji","PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
-    background: #0b0d10;
-    color: #d7dde6;
+    background: #f4f7fc;
+    color: #0f172a;
     padding: 28px 22px;
     font-size: 15px;
     line-height: 1.6;
@@ -70,25 +70,27 @@ ${FONT_FACE}
   /* ---- header ---- */
   .head { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 22px; }
   .logo {
-    background: #e5484d; color: #0b0d10;
+    background: linear-gradient(135deg, #1e4a76, #2c6288); color: #ffffff;
     font-family: "Inconsolata", monospace; font-weight: 700;
     padding: 6px 10px; border-radius: 8px; font-size: 22px; letter-spacing: 1px;
   }
   .head-main { flex: 1; }
   .kicker {
     font-family: "Inconsolata", monospace; font-size: 12px; letter-spacing: 2px;
-    color: #ff6b6e; text-transform: uppercase;
+    color: #2c6288; text-transform: uppercase;
   }
-  .h1 { font-size: 26px; font-weight: 700; color: #f2f5f9; line-height: 1.3; }
+  .h1 { font-size: 26px; font-weight: 700; line-height: 1.3;
+    background: linear-gradient(135deg, #1e4a76, #2c6288);
+    background-clip: text; -webkit-background-clip: text; color: transparent; }
   .head-time {
-    font-family: "Inconsolata", monospace; font-size: 13px; color: #8b93a1;
+    font-family: "Inconsolata", monospace; font-size: 13px; color: #5f7f9a;
     text-align: right; white-space: nowrap; line-height: 1.7;
   }
 
   /* ---- 通用卡片 / 分区标题 ---- */
   .card {
-    background: #14171d;
-    border: 1px solid #262b33;
+    background: #ffffff;
+    border: 1px solid #e6edf4;
     border-radius: 12px;
     padding: 16px 18px;
     margin-bottom: 16px;
@@ -96,69 +98,69 @@ ${FONT_FACE}
   .sec-title {
     font-family: "Inconsolata", monospace;
     font-size: 14px; font-weight: 700; letter-spacing: 1.5px;
-    color: #ff6b6e;
-    border-left: 3px solid #e5484d;
+    color: #0f4c5f;
+    border-left: 3px solid #2c6288;
     padding-left: 10px;
     margin-bottom: 12px;
     text-transform: uppercase;
     display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
   }
-  .sec-arrow { color: #e5484d; }
-  .sec-zh { color: #aeb7c4; font-family: "LXGW","NotoEmoji",sans-serif; letter-spacing: 0; font-size: 14px; }
-  .sec-count { color: #6b7482; font-size: 12px; margin-left: auto; }
+  .sec-arrow { color: #2c6288; }
+  .sec-zh { color: #5f7f9a; font-family: "LXGW","NotoEmoji",sans-serif; letter-spacing: 0; font-size: 14px; }
+  .sec-count { color: #6b8aa5; font-size: 12px; margin-left: auto; }
 
   /* ---- 版本信息 ---- */
-  .ver-line { font-family: "Inconsolata", monospace; font-size: 14.5px; color: #7ee787; word-break: break-all; }
+  .ver-line { font-family: "Inconsolata", monospace; font-size: 14.5px; color: #1b6b87; word-break: break-all; }
   .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .pill {
-    background: #2a1215; color: #ff8a8d;
-    border: 1px solid #4a1d20;
+    background: #eef2fa; color: #1b6b87;
+    border: 1px solid #dbe6f2;
     border-radius: 999px; padding: 3px 12px;
     font-size: 12.5px; font-family: "Inconsolata", monospace;
   }
-  .pill.ok { background: #12261a; color: #7ee787; border-color: #1d4028; }
+  .pill.ok { background: #e8f4ec; color: #1a7f4b; border-color: #cfe8d8; }
 
   /* ---- 统计数字卡 ---- */
   .num-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .num-card {
-    background: #191d24; border: 1px solid #2a3039; border-radius: 10px;
+    background: #fbfdff; border: 1px solid #e4edf6; border-radius: 10px;
     padding: 12px 10px; text-align: center;
   }
   .num {
     font-family: "Inconsolata", monospace; font-size: 30px; font-weight: 700;
-    color: #ff6b6e; line-height: 1.1;
+    color: #1b6b87; line-height: 1.1;
   }
-  .num-label { font-size: 13.5px; font-weight: 700; color: #d7dde6; margin-top: 4px; }
-  .num-sub { font-family: "Inconsolata", monospace; font-size: 11px; color: #6b7482; margin-top: 2px; }
+  .num-label { font-size: 13.5px; font-weight: 700; color: #1c5a78; margin-top: 4px; }
+  .num-sub { font-family: "Inconsolata", monospace; font-size: 11px; color: #6b8aa5; margin-top: 2px; }
 
   /* ---- 徽章 ---- */
   .badge-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .badge {
-    background: #1a1f27; border: 1px solid #2a3039;
+    background: #f1f6fb; border: 1px solid #e2ecf5;
     border-radius: 6px; padding: 2px 9px;
     font-size: 13px; font-family: "Inconsolata", monospace;
-    color: #9fb6cc;
+    color: #38678c;
   }
-  .badge-feat { color: #8fd0a0; }
-  .badge-empty { color: #55606d; }
+  .badge-feat { color: #177f4e; }
+  .badge-empty { color: #9ab0c4; }
 
   /* ---- footer ---- */
   .foot {
-    background: #14171d; border: 1px solid #262b33; border-radius: 12px;
+    background: #ffffff; border: 1px solid #e6edf4; border-radius: 12px;
     padding: 14px 18px; margin-top: 2px;
   }
   .foot-help {
-    font-family: "Inconsolata", monospace; font-size: 13px; color: #ff6b6e;
+    font-family: "Inconsolata", monospace; font-size: 13px; color: #0f4c5f;
     font-weight: 700; margin-bottom: 6px;
   }
-  .foot-grid { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: #8b93a1; }
-  .foot-grid b { color: #aeb7c4; font-weight: 600; }
+  .foot-grid { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: #5f7f9a; }
+  .foot-grid b { color: #2c5a74; font-weight: 600; }
   .foot-line {
-    margin-top: 10px; padding-top: 10px; border-top: 1px solid #262b33;
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid #eef2f7;
     display: flex; flex-wrap: wrap; gap: 6px 16px;
-    font-family: "Inconsolata", monospace; font-size: 12px; color: #6b7482;
+    font-family: "Inconsolata", monospace; font-size: 12px; color: #6b8aa5;
   }
-  .foot-line .v { color: #aeb7c4; }
+  .foot-line .v { color: #2c5a74; }
 </style>
 </head>
 <body>
