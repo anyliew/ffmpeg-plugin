@@ -174,8 +174,10 @@ export function buildHtml({ versionNumber, commits, icons, meta, stats, configCo
   // 编解码库数量统计（仅数字，详情见 #ff配置）
   const { encoders, decoders, hwaccels, muxers } = stats
   const statsGridHtml = [
-    { icon: videoIcon, num: encoders.video.length, label: '视频编码器', sub: `解码器 ${decoders.video.length}` },
-    { icon: musicIcon, num: encoders.audio.length, label: '音频编码器', sub: `解码器 ${decoders.audio.length}` },
+    { icon: videoIcon, num: encoders.video.length, label: '视频编码器', sub: 'encoders' },
+    { icon: videoIcon, num: decoders.video.length, label: '视频解码器', sub: 'decoders' },
+    { icon: musicIcon, num: encoders.audio.length, label: '音频编码器', sub: 'encoders' },
+    { icon: musicIcon, num: decoders.audio.length, label: '音频解码器', sub: 'decoders' },
     { icon: hardwareIcon, num: hwaccels.length, label: '硬件加速', sub: 'hwaccels' },
     { icon: packagedIcon, num: muxers.length, label: '封装格式', sub: 'muxers' },
     { icon: configIcon, num: configCount, label: '编译配置', sub: '--enable-*' },
