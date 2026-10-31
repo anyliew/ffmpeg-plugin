@@ -308,16 +308,6 @@ ${FONT_FACE}
             color: #1b6b87;
         }
 
-        .config-count {
-            font-size: 1.05rem;
-            font-weight: 700;
-            color: #6b8aa5;
-            background: #eef3f8;
-            padding: 0.25rem 1rem;
-            border-radius: 1rem;
-            margin-left: 0.5rem;
-        }
-
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -457,20 +447,20 @@ ${FONT_FACE}
         </div>
     </div>
 
-    <!-- 顺序2: 插件更新记录 -->
+    <!-- 顺序2: 更新记录 -->
     <div class="card">
         <div class="card-header">
-            <h2>${updateIcon} FFmpeg-Plugin 插件更新记录</h2>
+            <h2>${updateIcon} 更新记录</h2>
         </div>
         <ul class="commit-list">
             ${commitsHtml || '<li style="padding:1rem;">暂无提交记录</li>'}
         </ul>
     </div>
 
-    <!-- 顺序3: FFmpeg 编解码库（数量统计，详情见 #ff配置） -->
+    <!-- 顺序3: 编解码库（数量统计，详情见 #ff配置） -->
     <div class="card">
         <div class="card-header">
-            <h2>${relyIcon} FFmpeg 编解码库 <span class="config-count">详情发送 #ff配置</span></h2>
+            <h2>${relyIcon} 编解码库</h2>
         </div>
         <div class="stats-grid">
             ${statsGridHtml}
