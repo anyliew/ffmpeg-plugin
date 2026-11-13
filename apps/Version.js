@@ -100,7 +100,7 @@ export class ffmpegVersion extends plugin {
       const icons = await loadAllIcons()
 
       const html = buildHtml({ versionNumber, commits, icons, meta, stats, configCount })
-      const imagePath = await renderHtmlToImage(html, { width: 1080, scale: 3 })
+      const imagePath = await renderHtmlToImage(html, { width: 760, scale: 3 })
 
       await e.reply(segment.image(imagePath))
 

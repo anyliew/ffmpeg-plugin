@@ -157,6 +157,34 @@ async function cleanupTempFile(filePath) {
     }
 }
 
+/**
+ * 嗅探音频文件真实格式（只读文件头，不信任扩展名）。
+ * QQ 语音的真实容器是腾讯 SILK（文件名却常常带 .amr 后缀），
+ * ffmpeg 没有 SILK 解码器，直接喂进去会报 "Invalid data found when processing input"。
+ * @returns {Promise<'silk'|'amr'|'mp3'|'wav'|'flac'|'ogg'|'mp4/m4a'|'empty'|'unknown'>}
+ */
+async function sniffAudioFormat(filePath) {
+    const fd = await fs.promises.open(filePath, 'r')
+    try {
+        const buf = Buffer.alloc(16)
+        const { bytesRead } = await fd.read(buf, 0, 16, 0)
+        if (bytesRead === 0) return 'empty'
+        const head = buf.subarray(0, bytesRead)
+        const ascii = head.toString('latin1')
+        // NapCat 的 isSilk 判定：前 10 字节含 "#!SILK"（可带 0x02 前缀）
+        if (ascii.startsWith('#!SILK') || ascii.startsWith('\x02#!SILK')) return 'silk'
+        if (ascii.startsWith('#!AMR')) return 'amr'
+        if (ascii.startsWith('ID3') || (head[0] === 0xFF && (head[1] & 0xE0) === 0xE0)) return 'mp3'
+        if (ascii.startsWith('RIFF')) return 'wav'
+        if (ascii.startsWith('fLaC')) return 'flac'
+        if (ascii.startsWith('OggS')) return 'ogg'
+        if (ascii.slice(4, 8) === 'ftyp') return 'mp4/m4a'
+        return 'unknown'
+    } finally {
+        await fd.close()
+    }
+}
+
 async function removePath(targetPath) {
     try {
         await fs.promises.rm(targetPath, { recursive: true, force: true })
@@ -845,6 +873,60 @@ export class MediaBase extends plugin {
     // ================= 转码核心方法（使用时间戳命名） =================
 
     /**
+     * 语音/音频输入预处理。
+     * QQ 语音的真实格式是 SILK（文件名却常是 .amr），ffmpeg 无 SILK 解码器，
+     * 必须让协议端用 get_record 转成 ffmpeg 可解析的容器（NapCat/LLOneBot 均支持 out_format）。
+     * @returns {Promise<{path: string, cleanup: boolean}>} cleanup=true 表示临时文件需事后删除
+     */
+    async _normalizeAudioInput(inputPath, media, e, targetFormat) {
+        const format = await sniffAudioFormat(inputPath)
+        logger.info(`[多媒体插件] 音频真实格式嗅探: ${format}（扩展名 ${path.extname(media?.fileName || inputPath)}）`)
+
+        if (format === 'empty') {
+            throw new Error('下载到的语音文件为空（语音可能已过期或被清理），请重新发送语音后再试')
+        }
+        if (format !== 'silk') return { path: inputPath, cleanup: false }
+
+        // SILK：请协议端转码（mp3 目标要 mp3，flac/wav 目标要无损 wav 避免二次有损）
+        const data = media?.segment?.data || {}
+        const outFormat = targetFormat === 'mp3' ? 'mp3' : 'wav'
+        logger.info(`[多媒体插件] 检测到 QQ SILK 语音，调用 get_record 转为 ${outFormat}`)
+
+        let resp
+        try {
+            const params = { file: data.file || data.file_id || '', out_format: outFormat }
+            if (data.file_id) params.file_id = data.file_id
+            resp = await e.bot.sendApi('get_record', params)
+        } catch (err) {
+            throw new Error(`QQ 语音为 SILK 格式，协议端转码失败（get_record）: ${err.message}`)
+        }
+
+        const rec = resp?.data || resp || {}
+        // 1) 协议端与本机同机部署：直接读它转换好的本地文件
+        for (const cand of [rec.file, rec.file_name ? path.join(process.cwd(), String(rec.file_name)) : null]) {
+            if (!cand) continue
+            const p = String(cand)
+            if (fs.existsSync(p)) return { path: p, cleanup: false }
+        }
+        // 2) 协议端返回 base64
+        if (rec.base64) {
+            const buf = Buffer.from(String(rec.base64), 'base64')
+            if (buf.length > 0) {
+                const tmp = getTempFilePath(`.${outFormat}`)
+                await fs.promises.writeFile(tmp, buf)
+                return { path: tmp, cleanup: true }
+            }
+        }
+        // 3) 协议端返回可下载 url
+        if (rec.url) {
+            const tmp = getTempFilePath(`.${outFormat}`)
+            await downloadFile(rec.url, tmp)
+            return { path: tmp, cleanup: true }
+        }
+        throw new Error(`QQ 语音为 SILK 格式，协议端未返回可用的转码文件（get_record 响应: ${JSON.stringify(resp).slice(0, 200)}）`)
+    }
+
+    /**
      * 通用转码方法：下载 -> 转码 -> 发送文件（使用时间戳命名）
      * @param {Object} e - 事件对象
      * @param {string} targetFormat - 目标格式 'mp3' | 'flac' | 'wav'
@@ -852,7 +934,7 @@ export class MediaBase extends plugin {
      * @param {string} actionName - 显示用名称，如 'MP3'
      */
     async _transcodeAndSend(e, targetFormat, convertFn, actionName) {
-        let inputTempPath = null, outputTempPath = null
+        let inputTempPath = null, outputTempPath = null, normalizedTempPath = null
         try {
             await e.reply(`⏳ 正在将音视频转为 ${actionName} 文件，请稍等...`)
 
@@ -870,11 +952,16 @@ export class MediaBase extends plugin {
             const stat = await fs.promises.stat(inputTempPath)
             logger.info(`[转${actionName}] 下载完成，大小: ${formatSizeMB(stat.size)}`)
 
+            // QQ 语音实际是 SILK（扩展名常为 .amr），ffmpeg 无法直接解析 → 交给协议端转码
+            const normalized = await this._normalizeAudioInput(inputTempPath, media, e, targetFormat)
+            normalizedTempPath = normalized.cleanup ? normalized.path : null
+            const ffInputPath = normalized.path
+
             // 使用时间戳命名
             const outputFileName = generateTimestampFileName(targetFormat, media.fileName)
             outputTempPath = path.join(ensureTempDir(), outputFileName)
 
-            await convertFn(inputTempPath, outputTempPath)
+            await convertFn(ffInputPath, outputTempPath)
             const outStat = await fs.promises.stat(outputTempPath)
             logger.info(`[转${actionName}] ${actionName} 生成完成，大小: ${formatSizeMB(outStat.size)}`)
 
@@ -886,6 +973,7 @@ export class MediaBase extends plugin {
             await this.sendErrorAsForward(e, `转 ${actionName} 失败: ${err.message}`)
         } finally {
             await cleanupTempFile(inputTempPath)
+            await cleanupTempFile(normalizedTempPath)
             await cleanupTempFile(outputTempPath)
         }
         return true
